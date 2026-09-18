@@ -1,6 +1,8 @@
 # Changelog
 ## Unreleased
 
+## [5.15.0] - 2026-09-18
+
 ### New capabilities
 
 - Roles are exposed as a standalone `pi-extensible-workflows/roles` subpath (`discoverRoles`, `loadRole`, `resolveRole`) that resolves a role into plain data (model, tools, skills, extensions, prompt, context file scopes, unmatched selectors) without a workflow run; the workflow executor, validation, CLI, and subagents consume the same implementation (#294).
