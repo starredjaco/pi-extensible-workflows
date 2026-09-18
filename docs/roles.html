@@ -26,6 +26,7 @@
       <p class="toc-title">Roles</p>
       <a href="#overview">Overview</a>
       <a href="#api">Standalone API</a>
+      <a href="#pi-role">pi-role launcher</a>
       <a href="#files">Role files</a>
       <a href="#frontmatter">Frontmatter</a>
       <a href="#calls">Customize calls</a>
@@ -54,6 +55,11 @@
       <section id="api">
         <h2>Standalone roles API</h2>
         <p>The <code>pi-extensible-workflows/roles</code> subpath exposes role discovery without creating a workflow or host. Use <code>discoverRoles({ cwd, agentDir, projectTrusted, extensionRoleDirectories })</code> to load the active definitions, <code>loadRole(name, options)</code> to load one validated role, and <code>resolveRole(name, options)</code> to obtain its effective model, prompt mode, context scopes, selector layers, selected resources, and unmatched selectors. Optional <code>resources</code>, <code>rootTools</code>, <code>knownModels</code>, <code>availableModels</code>, and <code>modelAliases</code> provide the runtime boundaries needed for matching and model resolution; without them, selector layers are returned, while selected resources and tools remain unknown rather than being inferred.</p>
+      </section>
+      <section id="pi-role">
+        <h2>Launch Pi with a role</h2>
+        <p><code>@piewf/cli</code> ships a <code>pi-role</code> launcher. <code>pi-role &lt;role&gt; [pi arguments...]</code> resolves the role for the current directory and trust state, then starts the regular Pi CLI with the matching <code>--model</code>, <code>--tools</code>, <code>--no-skills --skill ...</code>, <code>--no-extensions --extension ...</code>, and <code>--system-prompt</code> or <code>--append-system-prompt</code> arguments. Every remaining argument is forwarded to Pi unchanged, so <code>pi-role reviewer --continue</code> and <code>pi-role scout -p "..."</code> work as expected. Run <code>pi-role</code> without arguments to list the available roles.</p>
+        <p>Trust follows Pi's saved project decision; pass <code>--approve</code> or <code>--no-approve</code> to override it for both role resolution and Pi. Tool selectors are matched against Pi's builtin tools plus the tool names the role requests, so extension tools such as <code>web_search</code> pass through to <code>--tools</code>. <code>contextFiles: []</code> becomes <code>--no-context-files</code>; roles that select a subset of scopes are rejected because the launcher does not reconstruct partial project context.</p>
       </section>
       <section id="files">
         <h2>Role files</h2>

@@ -55,6 +55,7 @@ test("the repository keeps the public package in the core workspace", () => {
   assert.equal(cli.name, "@piewf/cli");
   assert.equal(cli.version, root.version);
   assert.equal(cli.bin.piewf, "./dist/src/cli.js");
+  assert.equal(cli.bin["pi-role"], "./dist/src/pi-role.js");
   assert.equal(cli.publishConfig.access, "public");
 });
 

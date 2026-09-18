@@ -72,6 +72,10 @@ try {
   const cliOutput = `${cli.stdout ?? ""}${cli.stderr ?? ""}`;
   if (cli.error) throw cli.error;
   if (cli.status !== 0 || !cliOutput.includes("Usage: piewf run")) throw new Error(`Standalone CLI smoke test failed (${String(cli.status)}):\n${cliOutput}`);
+  const piRole = spawnSync(resolve(installRoot, "node_modules", ".bin", "pi-role"), ["--help"], { cwd: work, encoding: "utf8", env: { ...process.env, HOME: work, PI_CODING_AGENT_DIR: resolve(work, "agent") } });
+  const piRoleOutput = `${piRole.stdout ?? ""}${piRole.stderr ?? ""}`;
+  if (piRole.error) throw piRole.error;
+  if (piRole.status !== 0 || !piRoleOutput.includes("Usage: pi-role <role>") || !piRoleOutput.includes("developer")) throw new Error(`Standalone pi-role smoke test failed (${String(piRole.status)}):\n${piRoleOutput}`);
   execFileSync("npm", ["audit", "--prefix", installRoot, "--omit=dev"], { stdio: "pipe", timeout: 60_000 });
 
   const localPackages = ["pi-extensible-workflows", "@piewf/herdr"].map((name) => packagePath(installRoot, name));
