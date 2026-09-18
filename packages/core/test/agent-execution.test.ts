@@ -2264,6 +2264,34 @@ void test("setup hooks may narrow the prepared resource policy", async () => {
     rmSync(rootDir, { recursive: true, force: true });
   }
 });
+void test("setup hooks canonicalize relative extension narrowing", async () => {
+  const rootDir = mkdtempSync(join(tmpdir(), "pi-extensible-workflows-hook-extension-policy-"));
+  const agentDir = join(rootDir, "agent");
+  const cwd = join(rootDir, "project");
+  const extensionsDir = join(cwd, "extensions");
+  mkdirSync(agentDir, { recursive: true });
+  const disabledExtension = join(extensionsDir, "disabled.ts");
+  const keptExtension = join(extensionsDir, "kept.ts");
+  mkdirSync(extensionsDir, { recursive: true });
+  writeFileSync(join(agentDir, "models.json"), JSON.stringify({ providers: { fixture: { baseUrl: "http://127.0.0.1:1/v1", api: "openai-completions", apiKey: "fixture", models: [{ id: "fixture-model", name: "Fixture model", reasoning: false, input: ["text"], contextWindow: 1_024, maxTokens: 128 }] } } }));
+  writeFileSync(join(agentDir, "auth.json"), "{}");
+  writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ extensions: [disabledExtension, keptExtension] }));
+  writeFileSync(disabledExtension, "export default function() {}");
+  writeFileSync(keptExtension, "export default function() {}");
+  const policy = (): AgentResourcePolicy => ({ globalSettingsPath: "/global/settings.json", projectSettingsPath: "/project/settings.json", projectTrusted: true, global: { skills: [], extensions: ["**/*"] }, project: { skills: [], extensions: [] }, effective: { skills: [], extensions: ["**/*"] }, unmatchedSkills: [], unmatchedExtensions: [], selectorSources: { global: { extensions: ["**/*"] }, project: {} } });
+  const prepared = await prepareAgentSetupForInspection({ ...root, cwd, agentDir, model: { provider: "fixture", model: "fixture-model" }, availableModels: new Set([...root.availableModels ?? [], "fixture/fixture-model"]), agentResourcePolicy: policy, agentSetupHooks: [{ name: "narrow", priority: 1, setup(agent) { const resourcePolicy = agent.sessionInput.resourcePolicy; if (resourcePolicy) resourcePolicy.effective = { ...resourcePolicy.effective, extensions: [...resourcePolicy.effective.extensions, "!./extensions/disabled.ts"] }; } }] }, "work", { label: "worker", workflowName: "flow" }, localAgentTransport);
+  assert.equal(prepared.failure, undefined);
+  let session: Awaited<ReturnType<typeof createLocalPiSession>> | undefined;
+  try {
+    session = await createLocalPiSession(prepared.setup.sessionInput);
+    const extensionPaths = session.herdrResourcePaths?.extensions ?? [];
+    assert.ok(extensionPaths.includes(keptExtension));
+    assert.equal(extensionPaths.includes(disabledExtension), false);
+  } finally {
+    await session?.dispose();
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
 void test("setup hooks preserve interleaved resource narrowing", async () => {
   const rootDir = mkdtempSync(join(tmpdir(), "pi-extensible-workflows-hook-interleaved-resource-policy-"));
   const agentDir = join(rootDir, "agent");

@@ -5,6 +5,7 @@ export * from "./utils.js";
 export { canonicalPath, sameFilesystemPath } from "./paths.js";
 export * from "./budget.js";
 export * from "./validation.js";
+export * from "./roles.js";
 export * from "./registry.js";
 export * from "./execution.js";
 export * from "./host.js";
