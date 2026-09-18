@@ -56,7 +56,7 @@ void test("host runtime and workflow evals reuse the shared workflow-error guard
 void test("context-file scopes are declared once in types and reused by every consumer", () => {
   const types = source("types.ts");
   assert.match(types, /export type ContextFileScope = \(typeof CONTEXT_FILE_SCOPES\)\[number\];/);
-  for (const name of ["decoders.ts", "validation.ts", "host.ts", "agent-execution.ts"]) {
+  for (const name of ["decoders.ts", "settings.ts", "host.ts", "agent-execution.ts"]) {
     const consumer = source(name);
     assert.equal(importsFrom(consumer, "isContextFileScope", "\\./types\\.js"), true, `${name} must import the shared scope guard`);
     assert.doesNotMatch(consumer, /["']global["']\s*,\s*["']project["']\s*,\s*["']cwd["']/, `${name} must not restate the scope list`);
