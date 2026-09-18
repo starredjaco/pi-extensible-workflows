@@ -5,11 +5,12 @@ import { fileURLToPath } from "node:url";
 import test from "node:test";
 
 const validationPath = resolve(dirname(fileURLToPath(import.meta.url)), "../../src/validation.ts");
+const rolesPath = resolve(dirname(fileURLToPath(import.meta.url)), "../../src/roles.ts");
 
 void test("parseRoleMarkdown owns one local unquote helper for legacy metadata", () => {
-  const source = readFileSync(validationPath, "utf8");
+  const source = readFileSync(rolesPath, "utf8");
   const start = source.indexOf("export function parseRoleMarkdown(");
-  const end = source.indexOf("\nconst ROLE_DIRECTORY", start);
+  const end = source.indexOf("\nexport function workflowRoleDirectories", start);
   assert.notEqual(start, -1, "parseRoleMarkdown() is missing");
   assert.notEqual(end, -1, "parseRoleMarkdown() body is incomplete");
   const parser = source.slice(start, end);

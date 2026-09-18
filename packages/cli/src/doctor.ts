@@ -24,10 +24,8 @@ import {
   resolveModelReference,
   resourcePatternHasMagic,
   parseThinking,
-  parseRoleMarkdown,
   registeredWorkflowFunctions,
   registeredWorkflowRoleDirectoryRegistrations,
-  workflowRoleDirectories,
   workflowProjectSettingsPath,
   workflowSettingsPath,
   type AgentExecutionOptions,
@@ -42,6 +40,7 @@ import {
   type WorkflowSettingsSources,
 } from "pi-extensible-workflows";
 import type { AgentDefinition } from "pi-extensible-workflows";
+import { parseRoleMarkdown, workflowRoleDirectories } from "pi-extensible-workflows/roles";
 import { loadingRegistry, type WorkflowRegistryApi } from "pi-extensible-workflows";
 import { selectResourcesByLayers, unmatchedResourcePatterns, mergeWorkflowExtensionSettings } from "pi-extensible-workflows";
 export type DoctorSeverity = "error" | "warning";
@@ -398,6 +397,8 @@ export async function doctor(options: DoctorOptions = {}): Promise<DoctorReport>
   ].sort((left, right) => left.name.localeCompare(right.name) || left.kind.localeCompare(right.kind));
   const roles: DoctorRole[] = [];
   const definitions = new Map<string, AgentDefinition>();
+  // Keep this scan local because doctor reports every invalid and duplicate file; discoverRoles intentionally fails closed on the complete set.
+
   const extensionScan = scanExtensionRoleFiles(registeredWorkflowRoleDirectoryRegistrations());
   for (const { registration, error } of extensionScan.errors) {
     const message = errorText(error);

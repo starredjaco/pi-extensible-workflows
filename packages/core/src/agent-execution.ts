@@ -46,7 +46,7 @@ export interface PiResourceInspection {
   readonly systemPromptSource?: string;
 }
 import type { AgentAccounting, AgentActivity, AgentContinuity, AgentIdentity, AgentResourceInspection, AgentResourcePolicy, AgentResourceSelectors, AgentResourceSelectorSources, AgentSetup, AgentSetupSummary, AgentTransport, AgentTransportContext, ContextFileScope, JsonSchema, JsonValue, LiveSessionHandoff, ModelSpec, PiRuntimeLaunchInfo, PreparedAgentSession, RegisteredAgentSetupHook, SessionInput, WorkflowAgentMessage, WorkflowAgentSession, WorkflowAgentSessionEvent, WorkflowAgentSessionReference, WorkflowAgentSessionState, WorkflowAgentSessionStats, WorkflowAgentTurnResult, WorkflowExtensionSettings, WorkflowExtensionSettingsValidatorContext, WorkflowRunContext, WorkflowSessionStartEvent } from "./types.js";
-import { SerialLane, assertModelThinking, byPriorityThenName, deepFreeze, errorText, jsonObject, jsonValue, mergeWorkflowExtensionSettings, object, modelAliasName, modelCapability, resolveModelReference, resourcePatternHasMagic, selectResourcesByLayers, unmatchedResourcePatterns } from "./utils.js";
+import { SerialLane, assertModelThinking, byPriorityThenName, deepFreeze, errorText, jsonObject, jsonValue, mergeWorkflowExtensionSettings, object, resolveModelReference, resourcePatternHasMagic, unmatchedResourcePatterns } from "./utils.js";
 import { SETTLED_AGENT_STATES, WorkflowError, isContextFileScope, zeroAccounting, type AgentDefinition, type AgentState } from "./types.js";
 import { createLiveSessionHandoff } from "./session-handoff.js";
 import { createToolTimingExtension } from "./tool-timing.js";
@@ -56,6 +56,7 @@ import type { RuntimeAgentProgress, RuntimeUsage } from "./runtime/agent-runner.
 import { defaultWorkflowResultSchema } from "./runtime/workflow-result.js";
 import { validateAgentOptions, validateSchema } from "./validation.js";
 import { canonicalPath } from "./paths.js";
+import { canonicalExtensionSelector, resolveRole } from "./roles.js";
 import type { RunStore } from "./persistence.js";
 type AgentExecutionRunStore = Pick<RunStore, "recordSystemPrompt" | "validateWorktree" | "worktree" | "snapshotWorktree">;
 const localToolTimingExtension = createToolTimingExtension();
@@ -150,14 +151,6 @@ const WORKFLOW_HOST_ENTRIES = new Set([
   canonicalPath(resolve(workflowPackageRoot, "subagents/index.ts")),
   canonicalPath(resolve(workflowPackageRoot, "dist/subagents/index.js")),
 ]);
-function canonicalExtensionSelector(selector: string, base = process.cwd()): string {
-  const negated = selector.startsWith("!");
-  const body = negated ? selector.slice(1) : selector;
-  if (body === "*" || body === "**" || body.startsWith("**/")) return selector;
-  const resolved = resolve(base, body);
-  if (resourcePatternHasMagic(body)) return `${negated ? "!" : ""}${resolved}`;
-  return `${negated ? "!" : ""}${canonicalPath(resolved)}`;
-}
 const WORKFLOW_DIRECTORY = "pi-extensible-workflows";
 function workflowSystemPromptPath(cwd: string, agentDir: string, projectTrusted: boolean): string | undefined {
   const projectPath = join(cwd, ".pi", WORKFLOW_DIRECTORY, "SYSTEM.md");
@@ -308,20 +301,22 @@ async function createLocalPiSessionHandle(input: SessionInput, sessionStartEvent
     const resolved = await packageManager.resolve();
     const discoveredExtensions = [...new Set(resolved.extensions.filter(({ enabled, metadata }) => enabled && (policy.projectTrusted || metadata.scope !== "project")).map(({ path }) => canonicalPath(path)))];
     const selectorSources = policy.selectorSources;
-    const extensionLayers = [selectorSources.global.extensions, selectorSources.project.extensions, selectorSources.role?.extensions, selectorSources.call?.extensions];
-    const extensionSelectors = extensionLayers.flatMap((layer) => (layer ?? []).map((original) => ({ original, matching: canonicalExtensionSelector(original, input.cwd) })));
-    const selectedExtensions = selectResourcesByLayers(extensionLayers.map((layer) => layer?.map((selector) => canonicalExtensionSelector(selector, input.cwd))), discoveredExtensions);
+    const selection = resolveRole(undefined, {
+      cwd: input.cwd,
+      selectorSources,
+      resources: { extensions: discoveredExtensions },
+    });
+    const selectedExtensions = selection.selectedExtensions ?? [];
     const extensionPaths = selectedExtensions.filter((path) => !WORKFLOW_HOST_ENTRIES.has(path));
-    const unmatchedExtensions = extensionSelectors.filter(({ matching }) => unmatchedResourcePatterns([matching], discoveredExtensions).length > 0).map(({ original }) => original);
     policy.selectedExtensions = selectedExtensions;
-    policy.unmatchedExtensions = unmatchedExtensions;
+    policy.unmatchedExtensions = selection.unmatchedExtensions ?? [];
     const skillPaths = [...new Set(resolved.skills.filter(({ enabled, metadata }) => enabled && (policy.projectTrusted || metadata.scope !== "project")).map(({ path }) => path))];
     const updateSkillMatches = (skills: readonly { name: string }[]): Set<string> => {
       const names = [...new Set(skills.map(({ name }) => name))];
-      const skillLayers = [selectorSources.global.skills, selectorSources.project.skills, selectorSources.role?.skills, selectorSources.call?.skills];
-      const selectedSkills = selectResourcesByLayers(skillLayers, names);
+      const selected = resolveRole(undefined, { cwd: input.cwd, selectorSources, resources: { skills: names } });
+      const selectedSkills = selected.selectedSkills ?? [];
       policy.selectedSkills = selectedSkills;
-      policy.unmatchedSkills = unmatchedResourcePatterns(skillLayers.flatMap((layer) => layer ?? []), names);
+      policy.unmatchedSkills = selected.unmatchedSkills ?? [];
       return new Set(names.filter((name) => !selectedSkills.includes(name)));
     };
     resourceLoader = new DefaultResourceLoader({
@@ -916,7 +911,6 @@ export class WorkflowAgentExecutor {
     const roleName = typeof options.role === "string" ? options.role : undefined;
     const roleDefinition = roleName ? this.root.agentDefinitions?.[roleName] : undefined;
     if (roleName && !roleDefinition) throw new WorkflowError("UNKNOWN_AGENT_TYPE", `Unknown agent role: ${roleName}`);
-    const candidateTools = inheritedTools !== undefined ? [...inheritedTools] : [...this.root.tools];
     if (inheritedTools === undefined) for (const pattern of roleDefinition?.tools ?? []) {
       const body = pattern.startsWith("!") ? pattern.slice(1) : pattern;
       if (!pattern.startsWith("!") && !resourcePatternHasMagic(pattern) && !this.root.tools.has(body)) {
@@ -924,30 +918,30 @@ export class WorkflowAgentExecutor {
         if (!this.warnedRoleTools.has(key)) { this.warnedRoleTools.add(key); this.root.onResourceWarning?.(`Tool not available in this session for role ${roleName ?? "agent"}: ${body}. The agent runs without it.`); }
       }
     }
-    const selectorLayers = [
-      this.root.resourceSelectors?.tools,
-      roleDefinition?.tools,
-      options.tools,
-    ];
-    for (const pattern of options.tools ?? []) {
-      const body = pattern.startsWith("!") ? pattern.slice(1) : pattern;
-      if (!pattern.startsWith("!") && !resourcePatternHasMagic(pattern) && !candidateTools.includes(body)) throw new WorkflowError("UNKNOWN_TOOL", `Tool is outside the launching session boundary: ${body}`);
-    }
-    const outsideEffectiveTool = options.effectiveTools?.find((tool) => !candidateTools.includes(tool));
-    if (outsideEffectiveTool) throw new WorkflowError("UNKNOWN_TOOL", `Tool is outside the launching session boundary: ${outsideEffectiveTool}`);
-    const requested = options.effectiveTools ?? selectResourcesByLayers(selectorLayers, candidateTools);
-    const forbidden = requested.find((tool) => !this.root.tools.has(tool));
-    if (forbidden) throw new WorkflowError("UNKNOWN_TOOL", `Tool is outside the launching session boundary: ${forbidden}`);
-    const requestedModel = options.model ?? (roleDefinition?.model && roleDefinition.thinking && !roleDefinition.model.includes(":") ? `${roleDefinition.model}:${roleDefinition.thinking}` : roleDefinition?.model);
-    const alias = requestedModel === undefined ? undefined : modelAliasName(requestedModel, this.root.modelAliases ?? {});
-    const blockedAlias = requestedModel?.split(":", 1)[0];
-    if (requestedModel !== undefined && blockedAlias && this.root.blockedAliases?.has(blockedAlias) && !alias) { const target = this.root.blockedAliasTargets?.[blockedAlias]; throw new WorkflowError("UNKNOWN_MODEL", `Unknown model alias ${requestedModel}${target ? ` resolved to ${target}` : ""}${this.root.settingsPath ? ` (settings: ${this.root.settingsPath})` : ""}`); }
-    const model = options.modelOverride ?? parseModel(requestedModel, this.root.model, this.root.modelAliases, this.root.knownModels ?? this.root.availableModels, this.root.settingsPath);
-    const availableModels = this.root.knownModels ?? this.root.availableModels ?? new Set([modelCapability(this.root.model)]);
-    if (!availableModels.has(modelCapability(model))) throw new WorkflowError("UNKNOWN_MODEL", `Unknown model${requestedModel ? ` ${requestedModel} resolved to ${modelCapability(model)}` : ""}${this.root.settingsPath ? ` (settings: ${this.root.settingsPath})` : ""}`);
-    const overrideSystemPrompt = roleDefinition?.overrideSystemPrompt === true;
-    const contextFiles = options.contextFiles ?? roleDefinition?.contextFiles;
-    return { model, ...(alias && requestedModel ? { requestedModel } : {}), tools: requested, ...(overrideSystemPrompt ? { systemPrompt: roleDefinition.prompt ?? "" } : {}), systemPromptAppend: overrideSystemPrompt ? "" : roleDefinition?.prompt ?? "", ...(contextFiles === undefined ? {} : { contextFiles: [...contextFiles] }) };
+    const resolved = resolveRole(roleName, {
+      cwd: this.root.cwd,
+      ...(roleDefinition === undefined ? {} : { definition: roleDefinition }),
+      ...(this.root.agentDefinitions === undefined ? {} : { definitions: this.root.agentDefinitions }),
+      ...(this.root.agentDir === undefined ? {} : { agentDir: this.root.agentDir }),
+      selectorSources: { global: this.root.resourceSelectors ?? {}, project: {} },
+      ...(this.root.modelAliases === undefined ? {} : { modelAliases: this.root.modelAliases }),
+      ...(this.root.knownModels === undefined ? {} : { knownModels: this.root.knownModels }),
+      ...(this.root.availableModels === undefined ? {} : { availableModels: this.root.availableModels }),
+      ...(this.root.blockedAliases === undefined ? {} : { blockedAliases: this.root.blockedAliases }),
+      ...(this.root.blockedAliasTargets === undefined ? {} : { blockedAliasTargets: this.root.blockedAliasTargets }),
+      ...(this.root.settingsPath === undefined ? {} : { settingsPath: this.root.settingsPath }),
+      rootModel: this.root.model,
+      rootTools: this.root.tools,
+      ...(inheritedTools === undefined ? {} : { inheritedTools }),
+      ...(options.model === undefined ? {} : { model: options.model }),
+      ...(options.modelOverride === undefined ? {} : { modelOverride: options.modelOverride }),
+      ...(options.tools === undefined ? {} : { tools: options.tools }),
+      ...(options.skills === undefined ? {} : { skills: options.skills }),
+      ...(options.extensions === undefined ? {} : { extensions: options.extensions }),
+      ...(options.contextFiles === undefined ? {} : { contextFiles: options.contextFiles }),
+      ...(options.effectiveTools === undefined ? {} : { effectiveTools: options.effectiveTools }),
+    });
+    return { model: resolved.model ?? this.root.model, ...(resolved.requestedModel === undefined ? {} : { requestedModel: resolved.requestedModel }), tools: resolved.tools ?? [], ...(resolved.overrideSystemPrompt ? { systemPrompt: resolved.prompt } : {}), systemPromptAppend: resolved.overrideSystemPrompt ? "" : resolved.prompt, ...(resolved.contextFiles === undefined ? {} : { contextFiles: resolved.contextFiles }) };
   }
 
   async execute(task: string, options: AgentExecutionOptions, signal?: AbortSignal, customTools: readonly ToolDefinition[] = [], setSteer?: (handler: (message: string) => void | Promise<void>) => void, beforeRetry?: () => void): Promise<AgentExecutionResult> {

@@ -1,5 +1,5 @@
 import { execFileSync, spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -72,6 +72,17 @@ try {
   const cliOutput = `${cli.stdout ?? ""}${cli.stderr ?? ""}`;
   if (cli.error) throw cli.error;
   if (cli.status !== 0 || !cliOutput.includes("Usage: piewf run")) throw new Error(`Standalone CLI smoke test failed (${String(cli.status)}):\n${cliOutput}`);
+  const piRole = spawnSync(resolve(installRoot, "node_modules", ".bin", "pi-role"), ["--help"], { cwd: work, encoding: "utf8", env: { ...process.env, HOME: work, PI_CODING_AGENT_DIR: resolve(work, "agent") } });
+  const piRoleOutput = `${piRole.stdout ?? ""}${piRole.stderr ?? ""}`;
+  if (piRole.error) throw piRole.error;
+  if (piRole.status !== 0 || !piRoleOutput.includes("Usage: pi-role <role>") || !piRoleOutput.includes("developer")) throw new Error(`Standalone pi-role smoke test failed (${String(piRole.status)}):\n${piRoleOutput}`);
+  const fakeBin = resolve(work, "fake-bin");
+  mkdirSync(fakeBin, { recursive: true });
+  writeFileSync(resolve(fakeBin, "pi"), "#!/bin/sh\nprintf '%s\\n' \"$@\"\n", { mode: 0o755 });
+  const launch = spawnSync(resolve(installRoot, "node_modules", ".bin", "pi-role"), ["developer", "-p", "hello"], { cwd: work, encoding: "utf8", env: { ...process.env, HOME: work, PI_CODING_AGENT_DIR: resolve(work, "agent"), PATH: `${fakeBin}:${process.env.PATH ?? ""}` } });
+  const launchArgs = (launch.stdout ?? "").split("\n");
+  if (launch.error) throw launch.error;
+  if (launch.status !== 0 || launchArgs.includes("--model") || !launchArgs.includes("--append-system-prompt") || launchArgs.slice(-3, -1).join(" ") !== "-p hello" || !(launch.stderr ?? "").includes("developer-model")) throw new Error(`Standalone pi-role launch smoke test failed (${String(launch.status)}):\n${launch.stdout ?? ""}${launch.stderr ?? ""}`);
   execFileSync("npm", ["audit", "--prefix", installRoot, "--omit=dev"], { stdio: "pipe", timeout: 60_000 });
 
   const localPackages = ["pi-extensible-workflows", "@piewf/herdr"].map((name) => packagePath(installRoot, name));

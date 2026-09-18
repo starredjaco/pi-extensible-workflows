@@ -1,4 +1,4 @@
-import { ERROR_CODES, LAUNCH_SNAPSHOT_IDENTITY_VERSION, THINKING_LEVELS, WorkflowError, type JsonValue, type ModelSpec, type ThinkingLevel, type WorkflowErrorCode, type WorkflowExtensionSettings } from "./types.js";
+import { ERROR_CODES, LAUNCH_SNAPSHOT_IDENTITY_VERSION, THINKING_LEVELS, WorkflowError, type JsonSchema, type JsonValue, type ModelSpec, type ThinkingLevel, type WorkflowErrorCode, type WorkflowExtensionSettings } from "./types.js";
 import { Minimatch } from "minimatch";
 export class SerialLane {
   #tail: Promise<void> = Promise.resolve();
@@ -190,3 +190,10 @@ export function resourcePatternHasMagic(pattern: string): boolean { return /[*?\
 export function unmatchedResourcePatterns(patterns: readonly string[], resources: readonly string[]): string[] { return patterns.filter((pattern) => !resources.some((resource) => resourcePatternMatches(resource, pattern))); }
 export function createLaunchSnapshot(input: Omit<import("./types.js").LaunchSnapshot, "identityVersion"> & { identityVersion?: number }): Readonly<import("./types.js").LaunchSnapshot> { return deepFreeze(structuredClone({ ...input, identityVersion: input.identityVersion ?? LAUNCH_SNAPSHOT_IDENTITY_VERSION })); }
 export function loadLaunchSnapshot(input: import("./types.js").LaunchSnapshot): Readonly<import("./types.js").LaunchSnapshot> { return deepFreeze(structuredClone(input)); }
+
+export function validateSchema(schema: unknown, at = "schema"): asserts schema is JsonSchema {
+  if (!object(schema) || Object.getPrototypeOf(schema) !== Object.prototype || !jsonValue(schema)) fail("INVALID_SCHEMA", `${at} must be a plain JSON-compatible Schema object`);
+  if (typeof schema.type !== "string" && !Array.isArray(schema.type) && schema.$ref === undefined && schema.anyOf === undefined && schema.oneOf === undefined && schema.allOf === undefined && schema.const === undefined && schema.enum === undefined) fail("INVALID_SCHEMA", `${at} has no JSON Schema shape`);
+  if (schema.required !== undefined && (!Array.isArray(schema.required) || schema.required.some((key) => typeof key !== "string"))) fail("INVALID_SCHEMA", `${at}.required must be an array of strings`);
+  if (schema.properties !== undefined && !object(schema.properties)) fail("INVALID_SCHEMA", `${at}.properties must be an object`);
+}

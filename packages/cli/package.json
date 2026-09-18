@@ -10,16 +10,18 @@
   },
   "type": "module",
   "exports": {
-    ".": "./dist/src/cli.js"
+    ".": "./dist/src/cli.js",
+    "./pi-role": "./dist/src/pi-role.js"
   },
   "bin": {
-    "piewf": "./dist/src/cli.js"
+    "piewf": "./dist/src/cli.js",
+    "pi-role": "./dist/src/pi-role.js"
   },
   "files": [
     "dist/src"
   ],
   "scripts": {
-    "build": "npm --prefix ../.. run build --workspace=../core && rm -rf dist && tsc -p tsconfig.json && chmod +x dist/src/cli.js",
+    "build": "npm --prefix ../.. run build --workspace=../core && rm -rf dist && tsc -p tsconfig.json && chmod +x dist/src/cli.js dist/src/pi-role.js",
     "inspect": "node dist/src/cli.js inspect",
     "test": "npm run build && TEST_FILES='dist/test/*.test.js' npm run test:run",
     "test:run": "files=${TEST_FILES:-dist/test/*.test.js}; printf '%s\\n' $files | xargs -n1 -P20 sh -c 'tmp=$(mktemp -d); TMPDIR=\"$tmp\" node --test --test-concurrency=1 --test-timeout=60000 --test-force-exit --test-reporter=dot \"$1\"; status=$?; rm -rf \"$tmp\"; exit $status' sh",

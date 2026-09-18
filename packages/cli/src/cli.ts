@@ -8,7 +8,8 @@ import { ProjectTrustStore, SessionManager, SettingsManager, createAgentSessionF
 import { Value } from "typebox/value";
 import { doctor, doctorExitCode, formatDoctorReport, type DoctorOptions } from "./doctor.js";
 import { doctorCleanup, doctorCleanupExitCode, formatDoctorCleanupReport, type DoctorCleanupOptions } from "./doctor-cleanup.js";
-import workflowExtension, { errorText, formatWorkflowProgress, isNodeError, jsonValue, loadAgentDefinitions, object, registeredWorkflowFunctionSources, sameFilesystemPath, truncateWorkflowProgress, workflowCatalog, workflowSettingsPath, type JsonSchema, type JsonValue, type WorkflowExtensionAPI, type WorkflowProgressStyles } from "pi-extensible-workflows";
+import { loadAgentDefinitions } from "pi-extensible-workflows/roles";
+import workflowExtension, { errorText, formatWorkflowProgress, isNodeError, jsonValue, object, registeredWorkflowFunctionSources, sameFilesystemPath, truncateWorkflowProgress, workflowCatalog, workflowSettingsPath, type JsonSchema, type JsonValue, type WorkflowExtensionAPI, type WorkflowProgressStyles } from "pi-extensible-workflows";
 import { portableEngineVersion, portablePiVersion, writePortableWorkflowBundle } from "./bundles.js";
 import { runSessionInspector, transcriptFileLines, type InspectMode } from "./session-inspector.js";
 import { isPersistedRun, listPersistedSessionIds, listRunIds, type PersistedRun } from "pi-extensible-workflows/persistence";

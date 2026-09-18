@@ -1,6 +1,11 @@
 # Changelog
 ## Unreleased
 
+### New capabilities
+
+- Roles are exposed as a standalone `pi-extensible-workflows/roles` subpath (`discoverRoles`, `loadRole`, `resolveRole`) that resolves a role into plain data (model, tools, skills, extensions, prompt, context file scopes, unmatched selectors) without a workflow run; the workflow executor, validation, CLI, and subagents consume the same implementation (#294).
+- `@piewf/cli` adds a `pi-role <role> [pi arguments...]` launcher that resolves a role and starts the regular Pi CLI with the matching model, tools, skills, extensions, and system prompt arguments; remaining arguments are forwarded to Pi (#295).
+
 ## [5.14.1] - 2026-09-17
 
 ### Fixes

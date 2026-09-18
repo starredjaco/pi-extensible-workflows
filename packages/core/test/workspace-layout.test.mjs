@@ -34,6 +34,7 @@ test("the repository keeps the public package in the core workspace", () => {
     "./utils": "./dist/src/utils.js",
     "./budget": "./dist/src/budget.js",
     "./validation": "./dist/src/validation.js",
+    "./roles": "./dist/src/roles.js",
     "./registry": "./dist/src/registry.js",
     "./runtime": "./dist/src/runtime/index.js",
     "./trajectory": "./dist/trajectory/index.js"
@@ -54,6 +55,7 @@ test("the repository keeps the public package in the core workspace", () => {
   assert.equal(cli.name, "@piewf/cli");
   assert.equal(cli.version, root.version);
   assert.equal(cli.bin.piewf, "./dist/src/cli.js");
+  assert.equal(cli.bin["pi-role"], "./dist/src/pi-role.js");
   assert.equal(cli.publishConfig.access, "public");
 });
 

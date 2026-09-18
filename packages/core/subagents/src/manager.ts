@@ -12,7 +12,6 @@ import {
   isThinkingLevel,
   jsonValue,
   object,
-  loadAgentDefinitions,
   loadingRegistry,
   localAgentTransport,
   resolveAgentResourcePolicy,
@@ -43,6 +42,7 @@ import {
   SerialLane,
 } from "../../src/index.js";
 import { decodeAgentDefinition, decodeWorkflowExtensions } from "../../src/decoders.js";
+import { loadAgentDefinitions } from "../../src/roles.js";
 import { atomicJson, json as readJson, processAlive } from "../../src/persistence.js";
 import { accountingValue, activityValue, legacyAccountingValue, worktreeValue } from "./decode.js";
 import {
