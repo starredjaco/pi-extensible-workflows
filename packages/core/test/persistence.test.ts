@@ -17,9 +17,8 @@ function run(cwd: string, sessionId = "session-a") {
 }
 function settlesWithin(promise: Promise<unknown>, timeoutMs: number): Promise<boolean> { return new Promise((resolve) => { const timer = setTimeout(() => { resolve(false); }, timeoutMs); promise.then(() => { clearTimeout(timer); resolve(true); }, () => { clearTimeout(timer); resolve(true); }); }); }
 
-function windowsFileHolder(target: string, releaseAfterMs?: number) {
-  const releaseScript = releaseAfterMs === undefined ? "[Console]::In.ReadLine() | Out-Null;" : `Start-Sleep -Milliseconds ${String(releaseAfterMs)};`;
-  const holder = spawn("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", `$fs = [IO.FileStream]::new($env:REPRO_TARGET, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::None); [Console]::WriteLine('ready'); [Console]::Out.Flush(); ${releaseScript} $fs.Dispose()`], { env: { ...process.env, REPRO_TARGET: target }, stdio: ["pipe", "pipe", "pipe"] });
+function windowsFileHolder(target: string) {
+  const holder = spawn("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", "$fs = [IO.FileStream]::new($env:REPRO_TARGET, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::None); [Console]::WriteLine('ready'); [Console]::Out.Flush(); [Console]::In.ReadLine() | Out-Null; $fs.Dispose()"], { env: { ...process.env, REPRO_TARGET: target }, stdio: ["pipe", "pipe", "pipe"] });
   const stdout = holder.stdout;
   const stdin = holder.stdin;
   stdout.setEncoding("utf8");
@@ -69,12 +68,22 @@ void test("retries synchronous atomic replacement while a Windows handle denies 
   const root = mkdtempSync(join(tmpdir(), "pi-extensible-workflows-sync-rename-retry-"));
   const target = join(root, "state.json");
   writeFileSync(target, "old");
-  const { holder, ready, release } = windowsFileHolder(target, 200);
+  const { holder, ready, release } = windowsFileHolder(target);
   try {
     await ready;
     const writer = spawn(process.execPath, ["--input-type=module", "-e", `import { atomicWriteFile } from ${JSON.stringify(new URL("../src/io.js", import.meta.url).href)}; atomicWriteFile(process.env.REPRO_TARGET, "new", true);`], { env: { ...process.env, REPRO_TARGET: target }, stdio: ["ignore", "ignore", "pipe"] });
-    const exitCode = await new Promise<number | null>((resolve, reject) => { writer.once("error", reject); writer.once("exit", (code) => { resolve(code); }); });
-    assert.equal(exitCode, 0);
+    let stderr = "";
+    writer.stderr.setEncoding("utf8");
+    writer.stderr.on("data", (chunk: string) => { stderr += chunk; });
+    const closed = new Promise<number | null>((resolve, reject) => { writer.once("error", reject); writer.once("close", (code) => { resolve(code); }); });
+    // The holder keeps the target until the writer's temporary file exists, so the first rename always fails and the retry path is exercised.
+    for (let attempt = 0; attempt < 800 && writer.exitCode === null; attempt += 1) {
+      if (readdirSync(root).some((name) => name.startsWith("state.json.") && name.endsWith(".tmp"))) break;
+      await new Promise<void>((resolve) => setTimeout(resolve, 10));
+    }
+    release();
+    const exitCode = await closed;
+    assert.equal(exitCode, 0, `writer exited with ${String(exitCode)}: ${stderr}`);
     assert.equal(readFileSync(target, "utf8"), "new");
   } finally {
     release();
