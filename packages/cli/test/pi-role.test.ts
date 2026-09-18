@@ -16,6 +16,10 @@ function fixture(): { cwd: string; agentDir: string } {
   writeFileSync(join(agentDir, "pi-extensible-workflows", "settings.json"), JSON.stringify({ modelAliases: { "dev-model": "openai/gpt-5:high" }, skills: ["!*"] }));
   writeFileSync(join(agentDir, "pi-extensible-workflows", "roles", "developer.md"), "---\nmodel: dev-model\ntools: [\"!*\", read, bash, view_image]\nskills: [tigerstyle]\ncontextFiles: []\n---\nBe a developer.\n");
   writeFileSync(join(agentDir, "pi-extensible-workflows", "roles", "plain.md"), "---\noverrideSystemPrompt: true\ncontextFiles: [global]\n---\nOverride.\n");
+  writeFileSync(join(agentDir, "pi-extensible-workflows", "roles", "starterish.md"), "---\nmodel: not-configured-model\n---\nS.\n");
+  writeFileSync(join(agentDir, "pi-extensible-workflows", "roles", "dupes.md"), "---\ncontextFiles: [global, global, global]\n---\nD.\n");
+  mkdirSync(join(cwd, ".pi", "pi-extensible-workflows", "roles"), { recursive: true });
+  writeFileSync(join(cwd, ".pi", "pi-extensible-workflows", "roles", "local.md"), "Project role.\n");
   return { cwd, agentDir };
 }
 
@@ -30,6 +34,31 @@ void test("pi-role translates a resolved role into pi startup arguments", async 
     assert.ok(!args.includes("--extension"), "no extensions discovered in the fixture");
     await assert.rejects(resolvePiArguments("plain", [], cwd, agentDir), /subset of context file scopes/);
     await assert.rejects(resolvePiArguments("missing", [], cwd, agentDir), /Unknown agent role: missing/);
+  } finally { rmSync(join(cwd, ".."), { recursive: true, force: true }); }
+});
+
+void test("pi-role falls back to pi's default model when a role alias is not configured", async () => {
+  const { cwd, agentDir } = fixture();
+  const written: string[] = [];
+  const original = process.stderr.write.bind(process.stderr);
+  process.stderr.write = (chunk: string | Uint8Array) => { written.push(String(chunk)); return true; };
+  try {
+    const args = await resolvePiArguments("starterish", [], cwd, agentDir);
+    assert.ok(!args.includes("--model"), "no --model when the alias cannot be resolved");
+    assert.deepEqual(args.slice(-2), ["--append-system-prompt", "S."]);
+    assert.match(written.join(""), /Unknown model not-configured-model.*default model/);
+    await assert.rejects(resolvePiArguments("dupes", [], cwd, agentDir), /subset of context file scopes/, "duplicate scopes do not add up to the full set");
+  } finally { process.stderr.write = original; rmSync(join(cwd, ".."), { recursive: true, force: true }); }
+});
+
+void test("pi-role trust flags follow pi: last flag wins, nothing after -- counts, project roles need trust", async () => {
+  const { cwd, agentDir } = fixture();
+  try {
+    await assert.rejects(resolvePiArguments("local", [], cwd, agentDir), /Unknown agent role: local/, "no saved trust decision: project roles stay out");
+    await assert.rejects(resolvePiArguments("local", ["--", "--approve"], cwd, agentDir), /Unknown agent role: local/);
+    await assert.rejects(resolvePiArguments("local", ["--approve", "--no-approve"], cwd, agentDir), /Unknown agent role: local/);
+    const args = await resolvePiArguments("local", ["--no-approve", "-a"], cwd, agentDir);
+    assert.deepEqual(args.slice(-4), ["--append-system-prompt", "Project role.\n", "--no-approve", "-a"]);
   } finally { rmSync(join(cwd, ".."), { recursive: true, force: true }); }
 });
 

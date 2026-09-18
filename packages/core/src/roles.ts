@@ -179,7 +179,6 @@ export interface ResolvedRole {
   selectorLayers: { skills: readonly (readonly string[] | undefined)[]; extensions: readonly (readonly string[] | undefined)[]; tools: readonly (readonly string[] | undefined)[] };
   selectedSkills?: readonly string[];
   selectedExtensions?: readonly string[];
-  selectedTools?: readonly string[];
   unmatchedSkills?: readonly string[];
   unmatchedExtensions?: readonly string[];
   unmatchedTools?: readonly string[];
@@ -209,12 +208,11 @@ function roleEntries(dirs: readonly WorkflowRoleDirectoryInput[], extension: boo
   return extension ? { ...read(starterFiles), ...read(regularFiles) } : read(files);
 }
 type ResolvedRoleDiscoveryOptions = { cwd: string; agentDir: string; projectTrusted: boolean; extensionRoleDirectories: readonly WorkflowRoleDirectoryInput[] };
-function discoveryInput(input: RoleDiscoveryOptions | string, agentDir = getAgentDir(), projectTrusted = true, extensionRoleDirectories: readonly WorkflowRoleDirectoryInput[] = registeredWorkflowRoleDirectoryRegistrations()): ResolvedRoleDiscoveryOptions {
-  if (typeof input === "string") return { cwd: input, agentDir, projectTrusted, extensionRoleDirectories };
+function discoveryInput(input: RoleDiscoveryOptions): ResolvedRoleDiscoveryOptions {
   return { cwd: input.cwd, agentDir: input.agentDir ?? getAgentDir(), projectTrusted: input.projectTrusted ?? true, extensionRoleDirectories: input.extensionRoleDirectories ?? registeredWorkflowRoleDirectoryRegistrations() };
 }
-function discoveredRoleEntries(input: RoleDiscoveryOptions | string, agentDir?: string, projectTrusted?: boolean, extensionRoleDirectories?: readonly WorkflowRoleDirectoryInput[]): Record<string, RoleEntry> {
-  const resolved = discoveryInput(input, agentDir, projectTrusted, extensionRoleDirectories);
+function discoveredRoleEntries(input: RoleDiscoveryOptions): Record<string, RoleEntry> {
+  const resolved = discoveryInput(input);
   return {
     ...roleEntries(resolved.extensionRoleDirectories, true),
     ...roleEntries(workflowRoleDirectories(resolved.agentDir), false),
@@ -224,20 +222,16 @@ function discoveredRoleEntries(input: RoleDiscoveryOptions | string, agentDir?: 
 export function loadProjectAgentDefinitions(cwd: string): Readonly<Record<string, AgentDefinition>> {
   return deepFreeze(Object.fromEntries(Object.entries(roleEntries(projectRoleDirectories(join(cwd, ".pi")), false)).map(([name, entry]) => [name, entry.definition])));
 }
-export function discoverRoles(input: RoleDiscoveryOptions): Readonly<Record<string, AgentDefinition>>;
-export function discoverRoles(cwd: string, agentDir?: string, projectTrusted?: boolean, extensionRoleDirectories?: readonly WorkflowRoleDirectoryInput[]): Readonly<Record<string, AgentDefinition>>;
-export function discoverRoles(input: RoleDiscoveryOptions | string, agentDir?: string, projectTrusted = true, extensionRoleDirectories: readonly WorkflowRoleDirectoryInput[] = registeredWorkflowRoleDirectoryRegistrations()): Readonly<Record<string, AgentDefinition>> {
-  return deepFreeze(Object.fromEntries(Object.entries(discoveredRoleEntries(input, agentDir, projectTrusted, extensionRoleDirectories)).map(([name, entry]) => [name, entry.definition])));
+export function discoverRoles(input: RoleDiscoveryOptions): Readonly<Record<string, AgentDefinition>> {
+  return deepFreeze(Object.fromEntries(Object.entries(discoveredRoleEntries(input)).map(([name, entry]) => [name, entry.definition])));
 }
-export function loadRole(name: string, input: RoleDiscoveryOptions): AgentDefinition;
-export function loadRole(name: string, cwd: string, agentDir?: string, projectTrusted?: boolean, extensionRoleDirectories?: readonly WorkflowRoleDirectoryInput[]): AgentDefinition;
-export function loadRole(name: string, input: RoleDiscoveryOptions | string, agentDir?: string, projectTrusted = true, extensionRoleDirectories: readonly WorkflowRoleDirectoryInput[] = registeredWorkflowRoleDirectoryRegistrations()): AgentDefinition {
-  const entry = discoveredRoleEntries(input, agentDir, projectTrusted, extensionRoleDirectories)[name];
+export function loadRole(name: string, input: RoleDiscoveryOptions): AgentDefinition {
+  const entry = discoveredRoleEntries(input)[name];
   if (!entry) fail("UNKNOWN_AGENT_TYPE", `Unknown agent role: ${name}`);
   return entry.definition;
 }
 export function loadAgentDefinitions(cwd: string, agentDir = getAgentDir(), projectTrusted = true, extensionRoleDirectories: readonly WorkflowRoleDirectoryInput[] = registeredWorkflowRoleDirectoryRegistrations()): Readonly<Record<string, AgentDefinition>> {
-  return discoverRoles(cwd, agentDir, projectTrusted, extensionRoleDirectories);
+  return discoverRoles({ cwd, agentDir, projectTrusted, extensionRoleDirectories });
 }
 
 export function canonicalExtensionSelector(selector: string, base = process.cwd()): string {
@@ -307,7 +301,6 @@ export function resolveRole(name: string | undefined, options: RoleResolutionOpt
   const selectedSkills = resources.skills === undefined ? undefined : selectResourcesByLayers(selectorLayers.skills, resources.skills);
   const extensionResources = resources.extensions?.map((extension) => canonicalPath(extension));
   const selectedExtensions = extensionResources === undefined ? undefined : selectResourcesByLayers(selectorLayers.extensions, extensionResources);
-  const selectedTools = candidateTools === undefined ? undefined : tools;
   const unmatchedSkills = resources.skills === undefined ? undefined : unmatchedResourcePatterns(selectorLayers.skills.flatMap((layer) => layer ?? []), resources.skills);
   const unmatchedExtensions = extensionResources === undefined ? undefined : unmatchedResourcePatterns(selectorLayers.extensions.flatMap((layer) => layer ?? []), extensionResources);
   const unmatchedTools = candidateTools === undefined ? undefined : unmatchedResourcePatterns(selectorLayers.tools.flatMap((layer) => layer ?? []), candidateTools);
@@ -329,5 +322,5 @@ export function resolveRole(name: string | undefined, options: RoleResolutionOpt
   const prompt = definition?.prompt ?? "";
   const overrideSystemPrompt = definition?.overrideSystemPrompt === true;
   const contextFiles = options.contextFiles ?? definition?.contextFiles;
-  return { ...(name === undefined ? {} : { name }), ...(definition === undefined ? {} : { definition }), ...(model === undefined ? {} : { model }), ...(modelAliasName(requestedModel ?? "", aliases) && requestedModel ? { requestedModel } : {}), ...(tools === undefined ? {} : { tools }), prompt, overrideSystemPrompt, systemPrompt: { mode: overrideSystemPrompt ? "override" : "append", text: prompt }, ...(contextFiles === undefined ? {} : { contextFiles: [...contextFiles] }), ...(definition?.extensionSettings === undefined ? {} : { extensionSettings: definition.extensionSettings }), selectorSources, selectorLayers, ...(selectedSkills === undefined ? {} : { selectedSkills }), ...(selectedExtensions === undefined ? {} : { selectedExtensions }), ...(selectedTools === undefined ? {} : { selectedTools }), ...(unmatchedSkills === undefined ? {} : { unmatchedSkills }), ...(unmatchedExtensions === undefined ? {} : { unmatchedExtensions }), ...(unmatchedTools === undefined ? {} : { unmatchedTools }) };
+  return { ...(name === undefined ? {} : { name }), ...(definition === undefined ? {} : { definition }), ...(model === undefined ? {} : { model }), ...(modelAliasName(requestedModel ?? "", aliases) && requestedModel ? { requestedModel } : {}), ...(tools === undefined ? {} : { tools }), prompt, overrideSystemPrompt, systemPrompt: { mode: overrideSystemPrompt ? "override" : "append", text: prompt }, ...(contextFiles === undefined ? {} : { contextFiles: [...contextFiles] }), ...(definition?.extensionSettings === undefined ? {} : { extensionSettings: definition.extensionSettings }), selectorSources, selectorLayers, ...(selectedSkills === undefined ? {} : { selectedSkills }), ...(selectedExtensions === undefined ? {} : { selectedExtensions }), ...(unmatchedSkills === undefined ? {} : { unmatchedSkills }), ...(unmatchedExtensions === undefined ? {} : { unmatchedExtensions }), ...(unmatchedTools === undefined ? {} : { unmatchedTools }) };
 }
