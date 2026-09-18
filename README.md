@@ -68,6 +68,16 @@ return agent(prompt("Summarize these reports:\n\n{reports}", { reports }));
 
 Runs are backgrounded by default; set `foreground: true` to wait for the final value. Use `pipeline()` for staged work, `withWorktree()` for isolation, `checkpoint()` for approval, and `agent.create({ name })` with `handle.send()` when one agent must keep its transcript across turns.
 
+The same roles that workflows use can also start a plain Pi session, without a workflow:
+
+```sh
+npm install -g @piewf/cli
+pi-role reviewer                 # Pi with the reviewer role's model, tools, skills, and prompt
+pi-role scout -p "Where is the retry logic?"
+```
+
+See the [roles guide](https://vekexasia.github.io/pi-extensible-workflows/roles.html#pi-role).
+
 ## Included capabilities
 
 The single core installation provides workflows, the `reviewLoop` starter for developer-and-reviewer implementation cycles, packaged `developer`/`reviewer`/`scout`/`oracle`/`researcher` roles, and durable standalone subagent tools (`subagents_run`, `subagents_inspect`, `subagents_steer`, `subagents_stop`, and `subagents_retry`). Ready-made slash commands launch them: `/scout`, `/parallel-scout`, `/oracle`, `/council`, `/review`, `/parallel-review`, `/review-loop`, and `/deep-research`. Roles and aliases are overridable; `reviewLoop` is not. The starter, Subagents, and Trajectory can each be disabled with [Pi package filters](https://vekexasia.github.io/pi-extensible-workflows/extensions.html#bundled-filters).
@@ -75,7 +85,7 @@ The single core installation provides workflows, the `reviewLoop` starter for de
 ### Companion packages
 
 - [`@piewf/herdr`](https://github.com/vekexasia/pi-extensible-workflows/tree/main/packages/extensions/herdr) (`pi install npm:@piewf/herdr`): workflow-agent sessions in Herdr panes.
-- [`@piewf/cli`](https://github.com/vekexasia/pi-extensible-workflows/tree/main/packages/cli) (`pi install npm:@piewf/cli`): the `piewf` command for workflow operations.
+- [`@piewf/cli`](https://github.com/vekexasia/pi-extensible-workflows/tree/main/packages/cli) (`npm install -g @piewf/cli`): `pi-role <role>` to start Pi as a role, and `piewf` for doctor, inspection, headless runs, export, and bundles.
 
 ## Development
 

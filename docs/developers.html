@@ -44,8 +44,8 @@
         <h2>Installation and trust</h2>
         <p>Use Node.js 22.19 or newer. Every package is trusted Pi host code with the same filesystem and process access as Pi. Install only packages you trust, and trust the project before running workflows or <code>piewf doctor</code>.</p>
         <pre><code class="language-shell"><span class="tok-command">pi</span> install npm:pi-extensible-workflows
-<span class="tok-command">pi</span> install npm:@piewf/cli</code></pre>
-        <p>The core package provides workflow orchestration, the <code>reviewLoop</code> starter, and standalone subagent tools. Add <code>@piewf/cli</code> only when you need the <code>piewf</code> command, or add <code>@piewf/herdr</code> alongside core for Herdr session actions and transport integration.</p>
+<span class="tok-command">npm</span> install -g @piewf/cli</code></pre>
+        <p>The core package provides workflow orchestration, the <code>reviewLoop</code> starter, and standalone subagent tools. Add <code>@piewf/cli</code> only when you need the <code>piewf</code> or <a href="roles.html#pi-role"><code>pi-role</code></a> commands, or add <code>@piewf/herdr</code> alongside core for Herdr session actions and transport integration.</p>
         <p>For source installation and local development, clone the repository and change into its directory first:</p>
         <pre><code class="language-shell"><span class="tok-command">git</span> clone https://github.com/vekexasia/pi-extensible-workflows.git
 <span class="tok-command">cd</span> pi-extensible-workflows

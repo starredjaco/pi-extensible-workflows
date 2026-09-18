@@ -20,14 +20,14 @@ The core installation includes workflow orchestration, the `reviewLoop` starter,
 
 ```sh
 pi install npm:@piewf/herdr
-pi install npm:@piewf/cli
+npm install -g @piewf/cli
 ```
 
 | Package | Select it when |
 | --- | --- |
 | `pi-extensible-workflows` | The task needs workflows, the `reviewLoop` implementation-and-review starter, or one independent subagent run with a durable ID and lifecycle controls. |
 | `@piewf/herdr` | Core workflow agents need live handoff, completed-session inspection, or fully inspectable execution in Herdr. Core must also be loaded. |
-| `@piewf/cli` | A terminal needs doctor, inspection, headless registered-function or file-backed workflow execution, export, or bundle commands. |
+| `@piewf/cli` | A terminal needs doctor, inspection, headless registered-function or file-backed workflow execution, export, or bundle commands, or `pi-role <role> [pi arguments...]` to start a regular Pi session with a role's model, tools, skills, extensions, and system prompt. Install it with `npm install -g @piewf/cli` so both binaries are on `PATH`. |
 
 For local development:
 
