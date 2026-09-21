@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { createTrajectoryRunLoader, createTrajectoryRunMetadataLoader, createTrajectorySubagentLoader, createTrajectoryTranscriptLoader, applySystemPrompts, applyToolDescriptions, TRAJECTORY_MAX_TRANSCRIPT_BYTES } from "../../src/trajectory.js";
-import { trajectoryUrl } from "../src/index.js";
+import { minimalStatePublisher, trajectoryUrl } from "../src/index.js";
 import { RunStore } from "../../src/persistence.js";
 import { createLaunchSnapshot } from "../../src/utils.js";
 import type { PersistedRun } from "../../src/persistence.js";
@@ -934,11 +934,11 @@ void test("Trajectory renders launch arguments safely and preserves JSON falsy v
     const json = (value) => JSON.stringify(value, null, 2);
     ${source.slice(helperStart, helperEnd)}
     return { renderWorkflowArguments };
-  })()`) as { renderWorkflowArguments: (record: { snapshot?: { args?: unknown }; snapshotArgsTruncated?: boolean }) => string };
+  })()`) as { renderWorkflowArguments: (record: { snapshot?: { args?: unknown }; snapshotArgsTruncated?: boolean }, open?: boolean, key?: string) => string };
   for (const args of [undefined, null]) assert.equal(helpers.renderWorkflowArguments({ snapshot: { args } }), "");
   for (const args of [{}, [], "", false, 0]) {
     const html = helpers.renderWorkflowArguments({ snapshot: { args } });
-    assert.match(html, /<details class="workflow-args">/);
+    assert.match(html, /<details class="workflow-args"(?:>| )/);
     assert.doesNotMatch(html, /<details[^>]+open/);
     assert.match(html, /ARGUMENTS/);
     const expected = JSON.stringify(args).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
@@ -951,7 +951,27 @@ void test("Trajectory renders launch arguments safely and preserves JSON falsy v
   const incomplete = helpers.renderWorkflowArguments({ snapshot: { args: "partial" }, snapshotArgsTruncated: true });
   assert.match(incomplete, /incomplete/);
   assert.match(helpers.renderWorkflowArguments({ snapshot: {}, snapshotArgsTruncated: true }), /Arguments unavailable/);
-  assert.match(source, /function renderDossier\(publisher, record\).*renderWorkflowArguments\(record\)/s);
+  assert.match(helpers.renderWorkflowArguments({ snapshot: { args: {} } }, true, "publisher:run"), /<details class="workflow-args" open data-workflow-args="publisher:run">/);
+  assert.match(source, /renderWorkflowArguments\(record, state\.workflowArgumentsOpen\.has\(state\.currentRun\), state\.currentRun\)/);
+  assert.match(source, /document\.addEventListener\("toggle"/);
+});
+
+void test("Trajectory marks only incomplete workflow arguments in the live transport", () => {
+  const run = (args: unknown, extra: Record<string, unknown> = {}) => ({ run: { id: "run", workflowName: "trajectory", agents: [], state: "completed" }, snapshot: { args }, ...extra });
+  const publish = (args: unknown, extra: Record<string, unknown> = {}) => minimalStatePublisher({ runs: [run(args, extra)], subagents: [] }) as { runs?: readonly unknown[] };
+  for (const args of [undefined, null, {}, [], "", false, 0, { nested: [1, { value: true }] }]) {
+    const record = publish(args).runs?.[0] as Record<string, unknown>;
+    assert.equal(record.snapshotArgsTruncated, undefined, `normal arguments were marked incomplete: ${JSON.stringify(args)}`);
+  }
+  assert.equal((publish({ ok: true }, { awaiting: [{ context: { args: "x".repeat(70 * 1024) } }] }).runs?.[0] as Record<string, unknown>).snapshotArgsTruncated, undefined);
+  assert.equal((publish({ ok: true }, { run: { snapshot: { args: "x".repeat(70 * 1024) } } }).runs?.[0] as Record<string, unknown>).snapshotArgsTruncated, undefined);
+  for (const args of ["x".repeat(65 * 1024), Object.fromEntries(Array.from({ length: 65 }, (_, index) => [`key${String(index)}`, index])), Array.from({ length: 257 }, (_, index) => index)]) {
+    assert.equal((publish(args).runs?.[0] as Record<string, unknown>).snapshotArgsTruncated, true);
+  }
+  let deep: Record<string, unknown> = {};
+  const root = deep;
+  for (let index = 0; index < 10; index += 1) { const next: Record<string, unknown> = {}; deep.value = next; deep = next; }
+  assert.equal((publish(root).runs?.[0] as Record<string, unknown>).snapshotArgsTruncated, true);
 });
 
 void test("Trajectory run rendering preserves the dossier scroll across re-renders", () => {

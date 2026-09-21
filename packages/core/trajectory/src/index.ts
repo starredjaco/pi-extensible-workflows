@@ -211,34 +211,48 @@ function boundedTiming(value: unknown): unknown[] {
   }
   return retained;
 }
-type LiveBounds = { argsTruncated: boolean };
-function boundedLiveValue(value: unknown, key = "", depth = 0, bounds?: LiveBounds, inArgs = false): unknown {
-  const argsValue = inArgs || key === "args";
-  if (typeof value === "string") {
-    if (argsValue && Buffer.byteLength(value) > MAX_LIVE_STRING_BYTES && bounds) bounds.argsTruncated = true;
-    return boundedString(value, MAX_LIVE_STRING_BYTES);
+type LiveBounds = { argsTruncatedRuns: Set<number>; path: string[]; runIndex: number | undefined };
+function boundedLiveValue(value: unknown, key = "", depth = 0, bounds?: LiveBounds): unknown {
+  const pathLength = bounds?.path.length ?? 0;
+  if (bounds && key) bounds.path.push(key);
+  const argsValue = bounds !== undefined && bounds.path.length >= 3 && bounds.path[0] === "runs" && bounds.path[1] === "snapshot" && bounds.path[2] === "args";
+  const markArgsTruncated = () => { if (argsValue && bounds.runIndex !== undefined) bounds.argsTruncatedRuns.add(bounds.runIndex); };
+  try {
+    if (typeof value === "string") {
+      if (argsValue && Buffer.byteLength(value) > MAX_LIVE_STRING_BYTES) markArgsTruncated();
+      return boundedString(value, MAX_LIVE_STRING_BYTES);
+    }
+    if (typeof value === "number" || typeof value === "boolean" || value === null) return value;
+    if (depth >= 12) { markArgsTruncated(); return undefined; }
+    if (key === "timing" && !argsValue) return boundedTiming(value);
+    if (Array.isArray(value)) {
+      const array = value as readonly unknown[];
+      const maxEntries = !argsValue && LIVE_TRUNCATABLE_ARRAY_KEYS.has(key) ? MAX_LIVE_ARRAY_ENTRIES - 1 : MAX_LIVE_ARRAY_ENTRIES;
+      const entries = !argsValue && key === "attemptDetails" ? array.slice(-8) : !argsValue && LIVE_METADATA_ARRAY_KEYS.has(key) ? array : array.length <= maxEntries ? array : [...array.slice(0, 32), ...array.slice(-maxEntries + 32)];
+      if (entries.length !== array.length) markArgsTruncated();
+      const publisherRuns = bounds?.path.length === 1 && bounds.path[0] === "runs";
+      const bounded = entries.map((entry, index) => {
+        const previousRunIndex = bounds?.runIndex;
+        if (publisherRuns) bounds.runIndex = index;
+        const result = boundedLiveValue(entry, "", depth + 1, bounds);
+        if (bounds) bounds.runIndex = previousRunIndex;
+        return result;
+      });
+      if (entries.length !== array.length && LIVE_TRUNCATABLE_ARRAY_KEYS.has(key)) bounded.push({ type: "trajectory:truncated", field: key, omitted: array.length - entries.length });
+      return bounded;
+    }
+    if (object(value)) {
+      const result: LiveStateRecord = {};
+      const keys = Object.keys(value).sort();
+      const properties = !argsValue && LIVE_METADATA_OBJECT_KEYS.has(key) ? keys : keys.slice(0, MAX_LIVE_OBJECT_KEYS);
+      if (properties.length !== keys.length) markArgsTruncated();
+      for (const property of properties) result[property] = boundedLiveValue(value[property], property, depth + 1, bounds);
+      return result;
+    }
+    return undefined;
+  } finally {
+    if (bounds) bounds.path.length = pathLength;
   }
-  if (typeof value === "number" || typeof value === "boolean" || value === null) return value;
-  if (depth >= 12) { if (argsValue && bounds) bounds.argsTruncated = true; return undefined; }
-  if (key === "timing" && !argsValue) return boundedTiming(value);
-  if (Array.isArray(value)) {
-    const array = value as readonly unknown[];
-    const maxEntries = LIVE_TRUNCATABLE_ARRAY_KEYS.has(key) ? MAX_LIVE_ARRAY_ENTRIES - 1 : MAX_LIVE_ARRAY_ENTRIES;
-    const entries = key === "attemptDetails" ? array.slice(-8) : LIVE_METADATA_ARRAY_KEYS.has(key) ? array : array.length <= maxEntries ? array : [...array.slice(0, 32), ...array.slice(-maxEntries + 32)];
-    if (entries.length !== array.length && argsValue && bounds) bounds.argsTruncated = true;
-    const bounded = entries.map((entry) => boundedLiveValue(entry, "", depth + 1, bounds, argsValue));
-    if (entries.length !== array.length && LIVE_TRUNCATABLE_ARRAY_KEYS.has(key)) bounded.push({ type: "trajectory:truncated", field: key, omitted: array.length - entries.length });
-    return bounded;
-  }
-  if (object(value)) {
-    const result: LiveStateRecord = {};
-    const keys = Object.keys(value).sort();
-    const properties = LIVE_METADATA_OBJECT_KEYS.has(key) ? keys : keys.slice(0, MAX_LIVE_OBJECT_KEYS);
-    if (properties.length !== keys.length && argsValue && bounds) bounds.argsTruncated = true;
-    for (const property of properties) result[property] = boundedLiveValue(value[property], property, depth + 1, bounds, argsValue);
-    return result;
-  }
-  return undefined;
 }
 function transcriptRevisionProjection(value: unknown, depth = 0): unknown {
   if (depth >= 8) return typeof value === "string" ? boundedString(value, 1024) : typeof value === "number" || typeof value === "boolean" || value === null ? value : undefined;
@@ -284,19 +298,18 @@ function projectPublisher(metadata: TrajectoryPublisherMetadata, publisher: Live
   const publisherId = typeof publisher.id === "string" ? publisher.id : "";
   return { ...publisher, runs: metadata.runs.map((run) => projectRun(run as unknown as LiveStateRecord, `${publisherId}\t${run.run.id}`, revisions)), subagents: metadata.subagents.map((subagent) => projectSubagent(subagent as unknown as LiveStateRecord, `${publisherId}\tsubagent\t${subagent.id}`, revisions)) };
 }
-function minimalStatePublisher(publisher: LiveStateRecord): LiveStateRecord {
-  const bounded = (boundedLiveValue(publisher) as LiveStateRecord | undefined) ?? {};
+export function minimalStatePublisher(publisher: LiveStateRecord): LiveStateRecord {
+  const bounds: LiveBounds = { argsTruncatedRuns: new Set(), path: [], runIndex: undefined };
+  const bounded = (boundedLiveValue(publisher, "", 0, bounds) as LiveStateRecord | undefined) ?? {};
   const sourceRuns: readonly unknown[] = Array.isArray(publisher.runs) ? publisher.runs : [];
   const boundedRuns: readonly unknown[] = Array.isArray(bounded.runs) ? bounded.runs : [];
   if (!sourceRuns.length || !boundedRuns.length) return bounded;
   const runs = boundedRuns.map((run, index) => {
     const sourceRun = sourceRuns[index];
-    const bounds: LiveBounds = { argsTruncated: false };
-    boundedLiveValue(sourceRun, "", 0, bounds);
     const sourceSnapshot = object(sourceRun) && object(sourceRun.snapshot) ? sourceRun.snapshot : undefined;
     const boundedSnapshot = object(run) && object(run.snapshot) ? run.snapshot : undefined;
     const argsUnavailable = sourceSnapshot !== undefined && sourceSnapshot.args !== undefined && sourceSnapshot.args !== null && (boundedSnapshot === undefined || !Object.prototype.hasOwnProperty.call(boundedSnapshot, "args"));
-    return (bounds.argsTruncated || argsUnavailable) && object(run) ? { ...run, snapshotArgsTruncated: true } : run;
+    return (bounds.argsTruncatedRuns.has(index) || argsUnavailable) && object(run) ? { ...run, snapshotArgsTruncated: true } : run;
   });
   return { ...bounded, runs };
 }
