@@ -1,0 +1,203 @@
+import assert from "node:assert/strict";
+import { execFileSync, spawn } from "node:child_process";
+import { createServer } from "node:http";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
+import { join } from "node:path";
+import test from "node:test";
+import { exportTrajectoryRunHtml } from "../index.js";
+import { RunStore } from "../../src/persistence.js";
+import { createLaunchSnapshot } from "../../src/utils.js";
+import type { PersistedRun } from "../../src/persistence.js";
+
+type CdpRecord = Record<string, unknown>;
+type CdpMessage = CdpRecord & { id?: number; method?: string };
+type RouteBody = string | Buffer;
+
+function textValue(value: unknown, fallback: string): string { return typeof value === "string" ? value : fallback; }
+function delay(ms: number): Promise<void> { return new Promise((resolve) => setTimeout(resolve, ms)); }
+async function waitFor(page: Devtools, expression: string): Promise<void> {
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    if (await page.evaluate(expression)) return;
+    await delay(25);
+  }
+  throw new Error(`Chrome condition did not become true: ${expression}`);
+}
+function findBrowser(): string | undefined {
+  const candidates = [process.env.PI_TRAJECTORY_CHROME, "/usr/bin/chromium", "/usr/bin/google-chrome", "/usr/bin/chromium-browser"];
+  try {
+    for (const version of readdirSync(join(homedir(), ".cache", "ms-playwright"))) candidates.push(join(homedir(), ".cache", "ms-playwright", version, "chrome-linux64", "chrome"));
+  } catch { /* The browser cache is optional. */ }
+  for (const name of ["chromium", "google-chrome", "chromium-browser"]) {
+    try { candidates.push(execFileSync("which", [name], { encoding: "utf8" }).trim()); } catch { /* Try the next browser location. */ }
+  }
+  const found = candidates.find((candidate) => typeof candidate === "string" && Boolean(candidate) && existsSync(candidate));
+  return typeof found === "string" ? found : undefined;
+}
+
+class Devtools {
+  private nextId = 1;
+  private readonly pending = new Map<number, { resolve: (message: CdpMessage) => void; reject: (error: Error) => void }>();
+  constructor(private readonly socket: WebSocket) {
+    socket.addEventListener("message", (event) => {
+      let message: CdpMessage;
+      try { message = JSON.parse(String(event.data)) as CdpMessage; } catch { return; }
+      if (typeof message.id !== "number") return;
+      const request = this.pending.get(message.id);
+      if (!request) return;
+      this.pending.delete(message.id);
+      request.resolve(message);
+    });
+  }
+  command(method: string, params: CdpRecord = {}): Promise<CdpMessage> {
+    const id = this.nextId++;
+    this.socket.send(JSON.stringify({ id, method, params }));
+    return new Promise((resolve, reject) => { this.pending.set(id, { resolve, reject }); });
+  }
+  async evaluate(expression: string): Promise<unknown> {
+    const message = await this.command("Runtime.evaluate", { expression, returnByValue: true });
+    if (message.error) throw new Error(textValue((message.error as CdpRecord).message, "Chrome evaluation failed"));
+    const result = message.result as CdpRecord | undefined;
+    const exception = result?.exceptionDetails as CdpRecord | undefined;
+    if (exception) throw new Error(textValue(exception.description, textValue(exception.text, "Chrome evaluation failed")));
+    return (result?.result as CdpRecord | undefined)?.value;
+  }
+  close(): void {
+    for (const request of this.pending.values()) request.reject(new Error("Chrome DevTools connection closed"));
+    this.pending.clear();
+    this.socket.close();
+  }
+}
+
+async function connectDevtools(url: string): Promise<Devtools> {
+  const socket = new WebSocket(url);
+  await new Promise<void>((resolve, reject) => {
+    socket.addEventListener("open", () => { resolve(); });
+    socket.addEventListener("error", () => { reject(new Error("Chrome DevTools connection failed")); });
+  });
+  return new Devtools(socket);
+}
+
+async function waitForDevtools(port: number): Promise<string> {
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    try {
+      const response = await fetch(`http://127.0.0.1:${String(port)}/json`);
+      const pages = await response.json() as Array<{ type?: unknown; webSocketDebuggerUrl?: unknown }>;
+      const page = pages.find((candidate) => candidate.type === "page" && typeof candidate.webSocketDebuggerUrl === "string");
+      const websocketUrl = page?.webSocketDebuggerUrl;
+      if (typeof websocketUrl === "string") return websocketUrl;
+    } catch { /* Chrome is still starting. */ }
+    await delay(50);
+  }
+  throw new Error("Chrome DevTools did not start");
+}
+
+async function serve(routes: ReadonlyMap<string, RouteBody>): Promise<{ url: string; close: () => Promise<void> }> {
+  const server = createServer((request, response) => {
+    const path = new URL(request.url || "/", "http://127.0.0.1").pathname;
+    const body = routes.get(path);
+    if (body === undefined) { response.writeHead(404); response.end(); return; }
+    response.writeHead(200, { "content-type": path.endsWith(".js") ? "text/javascript" : "text/html" });
+    response.end(body);
+  });
+  await new Promise<void>((resolve, reject) => { server.once("error", reject); server.listen(0, "127.0.0.1", resolve); });
+  const address = server.address();
+  assert.ok(address && typeof address !== "string");
+  return { url: `http://127.0.0.1:${String(address.port)}`, close: () => new Promise<void>((resolve, reject) => { server.close((error) => { if (error) reject(error); else resolve(); }); }) };
+}
+
+async function withChrome(url: string, callback: (page: Devtools) => Promise<void>): Promise<void> {
+  const browser = findBrowser();
+  assert.ok(browser, "Chromium is required for Trajectory browser verification");
+  const portServer = createServer();
+  await new Promise<void>((resolve, reject) => { portServer.once("error", reject); portServer.listen(0, "127.0.0.1", resolve); });
+  const address = portServer.address();
+  assert.ok(address && typeof address !== "string");
+  const port = address.port;
+  await new Promise<void>((resolve, reject) => { portServer.close((error) => { if (error) reject(error); else resolve(); }); });
+  const profile = mkdtempSync(join(tmpdir(), "pi-extensible-workflows-chrome-"));
+  const child = spawn(browser, ["--headless=new", "--no-sandbox", "--disable-gpu", "--disable-dev-shm-usage", `--remote-debugging-port=${String(port)}`, `--user-data-dir=${profile}`, url], { stdio: "ignore" });
+  const childExited = new Promise<void>((resolve) => { child.once("close", () => { resolve(); }); });
+  let page: Devtools | undefined;
+  try {
+    page = await connectDevtools(await waitForDevtools(port));
+    for (let attempt = 0; attempt < 100; attempt += 1) {
+      if (await page.evaluate("document.readyState === 'complete'")) break;
+      await delay(25);
+    }
+    await callback(page);
+  } finally {
+    page?.close();
+    child.kill("SIGTERM");
+    await Promise.race([childExited, delay(2000)]);
+    for (let attempt = 0; attempt < 10; attempt += 1) {
+      try { rmSync(profile, { recursive: true, force: true }); break; } catch { await delay(50); }
+    }
+  }
+}
+
+function makeState(output: Record<string, unknown>, state: "running" | "completed"): Record<string, unknown> {
+  const agent = { id: "agent", name: "fixture-agent", label: "fixture-agent", state, attempts: 1, startedAt: 1, durationMs: state === "completed" ? 10 : undefined, model: { provider: "fixture", model: "model" }, requestedModel: "fixture/request", role: "reviewer", tools: ["read"], skills: ["review"], extensions: ["fixture"], prompt: "Inspect the fixture", systemPrompt: "System prompt", output, attemptDetails: [{ attempt: 1, transport: "local", setup: { cwd: "/project", model: { provider: "fixture", model: "model" }, tools: ["read"] } }] };
+  const run = { id: "run", workflowName: "fixture", cwd: "/project", sessionId: "session", state, agents: [agent], transcripts: { agent: [{ type: "message", timestamp: "2025-01-01T00:00:00.000Z", message: { role: "assistant", content: [{ type: "text", text: "transcript" }] } }] }, snapshot: { script: "return true;" } };
+  return { type: "state", publishers: [{ id: "publisher", title: "fixture", cwd: "/project", sessionId: "session", connected: true, themes: true, runs: [{ run }], subagents: [] }], updatedAt: 1 };
+}
+
+function clickExpression(selector: string): string { return `document.querySelector(${JSON.stringify(selector)}).click()`; }
+function outputTabClickExpression(): string { return "Array.from(document.querySelectorAll('#sys-tabs span')).find((tab) => tab.dataset.pane === 'output').click()"; }
+
+const browserPath = findBrowser();
+void test("Trajectory static export opens Agent details and its Output tab in Chromium", { skip: !browserPath, timeout: 120_000 }, async () => {
+  const root = mkdtempSync(join(tmpdir(), "pi-extensible-workflows-trajectory-browser-"));
+  const cwd = join(root, "project");
+  const home = join(root, "home");
+  const sessionFile = join(root, "session.jsonl");
+  mkdirSync(cwd, { recursive: true });
+  writeFileSync(sessionFile, `${JSON.stringify({ type: "message", message: { role: "assistant", content: [{ type: "text", text: "transcript" }] } })}\n`);
+  const store = new RunStore(cwd, "session", "run", home);
+  const model = { provider: "fixture", model: "model" };
+  const run = { id: "run", workflowName: "fixture", cwd, sessionId: "session", state: "completed", agentSessions: [], agents: [{ id: "agent", name: "fixture-agent", path: "agent", state: "completed", resultPath: "agent/call:1", attempts: 1, model, requestedModel: "fixture/request", role: "reviewer", tools: ["read"], attemptDetails: [{ attempt: 1, transport: "local", session: { transport: "local", sessionId: "native", locator: { sessionFile } }, setup: { cwd, hookNames: [], model, tools: ["read"] }, accounting: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0 } }] }] } as unknown as PersistedRun;
+  try {
+    await store.create(run, createLaunchSnapshot({ script: "return true;", args: null, metadata: { name: "fixture" }, settings: { concurrency: 1 }, models: ["fixture/model"], tools: [], agentTypes: [], roles: {}, schemas: [] }));
+    await store.complete("agent/call:1", { answer: false });
+    const html = await exportTrajectoryRunHtml({ cwd, sessionId: "session", runId: "run", home });
+    const server = await serve(new Map([["/report.html", html]]));
+    try {
+      await withChrome(`${server.url}/report.html`, async (page) => {
+        await waitFor(page, "Boolean(document.querySelector('.agent-grid-row'))");
+        await page.evaluate(clickExpression(".agent-grid-row"));
+        assert.equal(await page.evaluate("Boolean(document.querySelector('[data-agent-details]'))"), true);
+        await page.evaluate(clickExpression("[data-agent-details]"));
+        assert.match(String(await page.evaluate("document.getElementById('sys-tabs').textContent")), /PromptToolsSkillsExtensionsEnvironmentOutput/);
+        await page.evaluate(outputTabClickExpression());
+        assert.match(String(await page.evaluate("document.getElementById('sys-pane').textContent")), /answer.*false/);
+      });
+    } finally { await server.close(); }
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+void test("Trajectory Chromium view preserves the selected Output tab across live publisher updates", { skip: !browserPath, timeout: 120_000 }, async () => {
+  const source = readFileSync(new URL("../src/assets/index.html", import.meta.url), "utf8");
+  const marked = readFileSync(new URL("../src/assets/marked.min.js", import.meta.url));
+  const morphdom = readFileSync(new URL("../src/assets/morphdom.min.js", import.meta.url));
+  const bootstrap = `<script>(function(){class FakeSocket{constructor(){this.readyState=1;this.listeners={};window.__trajectorySocket=this;}addEventListener(type,listener){(this.listeners[type] ||= []).push(listener);}send(){}close(){}emit(type,data){for(const listener of this.listeners[type] || []) listener({data});}}window.WebSocket=FakeSocket;})();</script>`;
+  const html = source.replace("  <script>\n    const defaultRunLayout", `  ${bootstrap}\n  <script>\n    const defaultRunLayout`);
+  assert.notEqual(html, source);
+  const server = await serve(new Map<string, RouteBody>([["/index.html", html], ["/marked.min.js", marked], ["/morphdom.min.js", morphdom]]));
+  try {
+    await withChrome(`${server.url}/index.html`, async (page) => {
+      await waitFor(page, "Boolean(window.__trajectorySocket)");
+      const pending = JSON.stringify(makeState({ status: "pending" }, "running"));
+      await page.evaluate(`window.__trajectorySocket.emit('message', ${JSON.stringify(pending)})`);
+      await waitFor(page, "Boolean(document.querySelector('.agent-grid-row'))");
+      await page.evaluate(clickExpression(".agent-grid-row"));
+      await page.evaluate(clickExpression("[data-agent-details]"));
+      await page.evaluate(outputTabClickExpression());
+      assert.match(String(await page.evaluate("document.getElementById('sys-pane').textContent")), /not yet available/);
+      const available = JSON.stringify(makeState({ status: "available", value: { answer: "done" }, bytes: 18 }, "completed"));
+      await page.evaluate(`window.__trajectorySocket.emit('message', ${JSON.stringify(available)})`);
+      await waitFor(page, "document.getElementById('sys-pane').textContent.includes('done')");
+      assert.equal(await page.evaluate("document.querySelector('#sys-tabs [data-pane=output]').classList.contains('on')"), true);
+      assert.match(String(await page.evaluate("document.getElementById('sys-pane').textContent")), /answer.*done/);
+    });
+  } finally { await server.close(); }
+});
