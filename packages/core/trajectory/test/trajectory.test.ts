@@ -924,6 +924,36 @@ void test("Trajectory tool pane clicks record the selected pane", () => {
   assert.deepEqual(calls, ["inspector"]);
 });
 
+void test("Trajectory renders launch arguments safely and preserves JSON falsy values", () => {
+  const source = readFileSync(new URL("../src/assets/index.html", import.meta.url), "utf8");
+  const helperStart = source.indexOf("    function renderWorkflowArguments");
+  const helperEnd = source.indexOf("    function renderDossier", helperStart);
+  assert.ok(helperStart >= 0 && helperEnd > helperStart);
+  const helpers = runInNewContext(`(() => {
+    const esc = (value) => String(value ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+    const json = (value) => JSON.stringify(value, null, 2);
+    ${source.slice(helperStart, helperEnd)}
+    return { renderWorkflowArguments };
+  })()`) as { renderWorkflowArguments: (record: { snapshot?: { args?: unknown }; snapshotArgsTruncated?: boolean }) => string };
+  for (const args of [undefined, null]) assert.equal(helpers.renderWorkflowArguments({ snapshot: { args } }), "");
+  for (const args of [{}, [], "", false, 0]) {
+    const html = helpers.renderWorkflowArguments({ snapshot: { args } });
+    assert.match(html, /<details class="workflow-args">/);
+    assert.doesNotMatch(html, /<details[^>]+open/);
+    assert.match(html, /ARGUMENTS/);
+    const expected = JSON.stringify(args).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+    assert.ok(html.includes(expected));
+  }
+  const html = helpers.renderWorkflowArguments({ snapshot: { args: { nested: [1, { html: "<img src=x onerror=alert(1)>" }] } } });
+  assert.match(html, /&lt;img src=x onerror=alert\(1\)&gt;/);
+  assert.doesNotMatch(html, /<img src=x/);
+  assert.match(source, /\.inspector \.code\.args \{[^}]*max-height: min\(40vh, 420px\)[^}]*overflow: auto/);
+  const incomplete = helpers.renderWorkflowArguments({ snapshot: { args: "partial" }, snapshotArgsTruncated: true });
+  assert.match(incomplete, /incomplete/);
+  assert.match(helpers.renderWorkflowArguments({ snapshot: {}, snapshotArgsTruncated: true }), /Arguments unavailable/);
+  assert.match(source, /function renderDossier\(publisher, record\).*renderWorkflowArguments\(record\)/s);
+});
+
 void test("Trajectory run rendering preserves the dossier scroll across re-renders", () => {
   const source = readFileSync(new URL("../src/assets/index.html", import.meta.url), "utf8");
   const start = source.indexOf("    function renderRun()");
