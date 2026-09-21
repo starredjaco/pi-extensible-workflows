@@ -78,8 +78,9 @@ async function connectDevtools(url: string): Promise<Devtools> {
   return new Devtools(socket);
 }
 
-async function waitForDevtools(port: number): Promise<string> {
-  for (let attempt = 0; attempt < 100; attempt += 1) {
+async function waitForDevtools(port: number, child: ReturnType<typeof spawn>, stderr: () => string): Promise<string> {
+  for (let attempt = 0; attempt < 600; attempt += 1) {
+    if (child.exitCode !== null) throw new Error(`Chrome exited before DevTools started (code ${String(child.exitCode)}, signal ${String(child.signalCode)}${stderr() ? `): ${stderr().trim()}` : ")"}`);
     try {
       const response = await fetch(`http://127.0.0.1:${String(port)}/json`);
       const pages = await response.json() as Array<{ type?: unknown; webSocketDebuggerUrl?: unknown }>;
@@ -89,7 +90,7 @@ async function waitForDevtools(port: number): Promise<string> {
     } catch { /* Chrome is still starting. */ }
     await delay(50);
   }
-  throw new Error("Chrome DevTools did not start");
+  throw new Error(`Chrome DevTools did not start${stderr() ? `: ${stderr().trim()}` : ""}`);
 }
 
 async function serve(routes: ReadonlyMap<string, RouteBody>): Promise<{ url: string; close: () => Promise<void> }> {
@@ -116,11 +117,14 @@ async function withChrome(url: string, callback: (page: Devtools) => Promise<voi
   const port = address.port;
   await new Promise<void>((resolve, reject) => { portServer.close((error) => { if (error) reject(error); else resolve(); }); });
   const profile = mkdtempSync(join(tmpdir(), "pi-extensible-workflows-chrome-"));
-  const child = spawn(browser, ["--headless=new", "--no-sandbox", "--disable-gpu", "--disable-dev-shm-usage", `--remote-debugging-port=${String(port)}`, `--user-data-dir=${profile}`, url], { stdio: "ignore" });
+  const child = spawn(browser, ["--headless=new", "--no-sandbox", "--disable-gpu", "--disable-dev-shm-usage", "--no-first-run", "--no-default-browser-check", `--remote-debugging-port=${String(port)}`, `--user-data-dir=${profile}`, url], { stdio: ["ignore", "ignore", "pipe"] });
+  const stderr: string[] = [];
+  child.stderr.setEncoding("utf8");
+  child.stderr.on("data", (chunk: string) => { stderr.push(chunk); });
   const childExited = new Promise<void>((resolve) => { child.once("close", () => { resolve(); }); });
   let page: Devtools | undefined;
   try {
-    page = await connectDevtools(await waitForDevtools(port));
+    page = await connectDevtools(await waitForDevtools(port, child, () => stderr.join("")));
     for (let attempt = 0; attempt < 100; attempt += 1) {
       if (await page.evaluate("document.readyState === 'complete'")) break;
       await delay(25);
