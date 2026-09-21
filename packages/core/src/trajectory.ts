@@ -3,7 +3,7 @@ import { open, readFile, readdir, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { createBashToolDefinition, createEditToolDefinition, createFindToolDefinition, createGrepToolDefinition, createLsToolDefinition, createReadToolDefinition, createWriteToolDefinition, DefaultPackageManager, getAgentDir, SettingsManager, DEFAULT_MAX_BYTES } from "@earendil-works/pi-coding-agent";
-import { listRunIds, RunStore, type AwaitingCheckpoint, type EffectiveSystemPrompt, type PersistedRun } from "./persistence.js";
+import { listRunIds, RunStore, type AwaitingCheckpoint, type CompletedOperation, type EffectiveSystemPrompt, type PersistedRun } from "./persistence.js";
 import { navigatorAttentionSortByState } from "./host-view.js";
 import type { AgentAttemptSummary, JsonValue, LaunchSnapshot, WorkflowAgentSessionReference } from "./types.js";
 import { normalizeSubagentRunRequest, type SubagentProgress, type SubagentRunRequest, type SubagentStatus } from "../subagents/src/contracts.js";
@@ -15,6 +15,12 @@ import { canonicalPath, sameFilesystemPath } from "./paths.js";
 export const TRAJECTORY_MAX_TRANSCRIPT_BYTES = 2 * 1024 * 1024;
 const TRAJECTORY_MAX_NON_TIMING_ENTRIES = 400;
 
+export type TrajectoryAgentOutput =
+  | { readonly status: "available"; readonly value: JsonValue; readonly bytes: number }
+  | { readonly status: "pending" }
+  | { readonly status: "failed" | "cancelled"; readonly code: string; readonly message: string }
+  | { readonly status: "truncated"; readonly kind: "result" | "failure"; readonly bytes: number; readonly path?: string }
+  | { readonly status: "unavailable" };
 export type TrajectoryRun = {
   run: PersistedRun;
   snapshot: Readonly<LaunchSnapshot>;
@@ -26,6 +32,18 @@ export type TrajectoryTranscriptStatus = "available" | "empty" | "missing" | "fa
 export type TrajectoryTranscriptMetadata = { readonly revision: number; readonly status: TrajectoryTranscriptStatus; readonly bytes?: number; readonly timing?: readonly unknown[]; };
 export type TrajectoryRunMetadata = Omit<TrajectoryRun, "transcripts"> & { transcripts: Readonly<Record<string, TrajectoryTranscriptMetadata>> };
 export type TrajectorySubagentArtifact = { readonly truncated: true; readonly path: string; readonly bytes: number };
+function subagentOutput(state: SubagentStatus["state"], statusError: SubagentStatus["error"], attempt: AgentAttemptSummary | undefined, result: JsonValue | undefined, resultTruncated: boolean, resultPath: string, resultBytes: number | undefined, failure: { readonly code: string; readonly message: string } | undefined, failureTruncated: boolean, failurePath: string, failureBytes: number | undefined): TrajectoryAgentOutput {
+  if (resultTruncated) return { status: "truncated", kind: "result", path: resultPath, bytes: resultBytes ?? 0 };
+  if (result !== undefined) return { status: "available", value: result, bytes: serializedJsonBytes(result) };
+  if (failureTruncated) return { status: "truncated", kind: "failure", path: failurePath, bytes: failureBytes ?? 0 };
+  if (failure !== undefined) return { status: "failed", code: failure.code, message: failure.message };
+  if (state === "failed" || state === "stopped") {
+    const error = statusError ?? attempt?.error;
+    return { status: state === "stopped" ? "cancelled" : "failed", code: error?.code ?? (state === "stopped" ? "CANCELLED" : "AGENT_FAILED"), message: error?.message ?? `Subagent ${state}` };
+  }
+  if (state === "completed") return { status: "unavailable" };
+  return { status: "pending" };
+}
 export type TrajectorySubagent = {
   id: string;
   sessionId: string;
@@ -47,6 +65,7 @@ export type TrajectorySubagent = {
   attempt?: AgentAttemptSummary;
   result?: JsonValue | TrajectorySubagentArtifact;
   failure?: { readonly code: string; readonly message: string } | TrajectorySubagentArtifact;
+  output: TrajectoryAgentOutput;
   transcript: readonly unknown[];
 };
 export type TrajectorySubagentMetadata = Omit<TrajectorySubagent, "transcript"> & { transcript: TrajectoryTranscriptMetadata };
@@ -277,11 +296,35 @@ function withoutAgentActivities(run: PersistedRun): PersistedRun {
   return agents.every((agent, index) => agent === run.agents[index]) ? run : { ...run, agents };
 }
 
+function serializedJsonBytes(value: JsonValue): number {
+  const serialized = JSON.stringify(value);
+  return Buffer.byteLength(serialized, "utf8");
+}
+function failedAgentOutput(agent: PersistedRun["agents"][number]): TrajectoryAgentOutput {
+  const error = [...(agent.attemptDetails ?? [])].reverse().find((attempt) => attempt.error)?.error;
+  const status = agent.state === "cancelled" ? "cancelled" : "failed";
+  return { status, code: error?.code ?? (status === "cancelled" ? "CANCELLED" : "AGENT_FAILED"), message: error?.message ?? `Agent ${agent.state}` };
+}
+function outputForAgent(agent: PersistedRun["agents"][number], operation: CompletedOperation | undefined): TrajectoryAgentOutput {
+  if (operation !== undefined) {
+    const bytes = serializedJsonBytes(operation.value);
+    return bytes > DEFAULT_MAX_BYTES ? { status: "truncated", kind: "result", bytes } : { status: "available", value: operation.value, bytes };
+  }
+  if (agent.state === "failed" || agent.state === "cancelled") return failedAgentOutput(agent);
+  if (agent.state === "completed") return { status: "unavailable" };
+  return { status: "pending" };
+}
+export function applyTrajectoryAgentOutputs(run: PersistedRun, operations: readonly CompletedOperation[]): PersistedRun {
+  const byPath = new Map(operations.map((operation) => [operation.path, operation]));
+  const agents = run.agents.map((agent) => ({ ...agent, output: outputForAgent(agent, agent.resultPath === undefined ? undefined : byPath.get(agent.resultPath)) }));
+  return { ...run, agents };
+}
 async function loadTrajectoryRun(store: RunStore, includeTranscripts = true): Promise<TrajectoryRun> {
   const value = await store.load();
   const summary = await store.loadSummary().catch(() => undefined);
   const prompts = await store.systemPrompts().catch(() => []);
-  const run = withoutAgentActivities(await withResolvedResources(withPiToolDescriptions(applySystemPrompts(value.run, prompts)), store.cwd));
+  const prepared = withoutAgentActivities(await withResolvedResources(withPiToolDescriptions(applySystemPrompts(value.run, prompts)), store.cwd));
+  const run = applyTrajectoryAgentOutputs(prepared, await store.replayableOperations());
   return { run, snapshot: value.snapshot, awaiting: await store.awaitingCheckpoints(), ...(summary?.createdAt === undefined ? {} : { createdAt: summary.createdAt }), transcripts: includeTranscripts ? await runTranscripts(run) : {} };
 }
 
@@ -490,6 +533,7 @@ async function loadTrajectorySubagent(directory: string, cwd: string, sessionId:
       ...(attempt === undefined ? {} : { attempt }),
       ...(result === undefined ? {} : { result }),
       ...(failure === undefined ? {} : { failure }),
+      output: subagentOutput(status.state, status.error, attempt, resultValue === undefined ? undefined : boundedSubagentJson(resultValue), resultTruncated, resultPath, resultBytes, failureValue === undefined ? undefined : subagentErrorValue(failureValue), failureTruncated, failurePath, failureBytes),
     };
   } catch { return undefined; }
 }

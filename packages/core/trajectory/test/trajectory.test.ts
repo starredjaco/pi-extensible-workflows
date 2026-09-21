@@ -4,7 +4,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { createTrajectoryRunLoader, createTrajectoryRunMetadataLoader, createTrajectorySubagentLoader, createTrajectoryTranscriptLoader, applySystemPrompts, applyToolDescriptions, TRAJECTORY_MAX_TRANSCRIPT_BYTES } from "../../src/trajectory.js";
+import { applyTrajectoryAgentOutputs, createTrajectoryRunLoader, createTrajectoryRunMetadataLoader, createTrajectorySubagentLoader, createTrajectoryTranscriptLoader, applySystemPrompts, applyToolDescriptions, TRAJECTORY_MAX_TRANSCRIPT_BYTES } from "../../src/trajectory.js";
 import { minimalStatePublisher, trajectoryUrl } from "../src/index.js";
 import { RunStore } from "../../src/persistence.js";
 import { createLaunchSnapshot } from "../../src/utils.js";
@@ -15,6 +15,23 @@ void test("applySystemPrompts fills missing prompts from session records", () =>
   const next = applySystemPrompts(run, [{ sessionId: "s1", attempt: 1, turn: 1, sha256: "x", prompt: "hello" }, { sessionId: "s2", attempt: 1, turn: 1, sha256: "y", prompt: "ignored" }]);
   assert.equal(next.agents[0]?.systemPrompt, "hello");
   assert.equal(next.agents[1]?.systemPrompt, "keep");
+});
+
+void test("trajectory maps authoritative journal results to the selected agent operation", () => {
+  const run = { agents: [
+    { id: "first", state: "completed", resultPath: "agent/handle/author/turn:1", attempts: 1 },
+    { id: "second", state: "completed", resultPath: "agent/handle/author/turn:2", attempts: 1 },
+    { id: "failed", state: "failed", resultPath: "agent/failed", attempts: 1, attemptDetails: [{ attempt: 1, error: { code: "FAILED", message: "no" } }] },
+    { id: "legacy", state: "completed", attempts: 1 },
+  ] } as unknown as PersistedRun;
+  const next = applyTrajectoryAgentOutputs(run, [
+    { path: "agent/handle/author/turn:1", value: false },
+    { path: "agent/handle/author/turn:2", value: { answer: 42 } },
+  ]);
+  assert.deepEqual((next.agents[0] as { output?: unknown }).output, { status: "available", value: false, bytes: 5 });
+  assert.deepEqual((next.agents[1] as { output?: unknown }).output, { status: "available", value: { answer: 42 }, bytes: 13 });
+  assert.deepEqual((next.agents[2] as { output?: unknown }).output, { status: "failed", code: "FAILED", message: "no" });
+  assert.deepEqual((next.agents[3] as { output?: unknown }).output, { status: "unavailable" });
 });
 
 void test("applyToolDescriptions fills missing Pi tool descriptions", () => {
@@ -70,8 +87,10 @@ void test("trajectory loads first-class subagents with filtering, ordering, tran
     assert.equal(typeof locator === "object" && locator !== null && !Array.isArray(locator) && "sessionFile" in locator ? locator.sessionFile : undefined, transcriptPath);
     assert.equal(current.transcript.length, 1);
     assert.deepEqual(current.result, { id: "with-transcript" });
+    assert.deepEqual(current.output, { status: "available", value: { id: "with-transcript" }, bytes: 24 });
     const failed = subagents.find((subagent) => subagent.id === "failed");
     assert.deepEqual(failed?.failure, { code: "AGENT_FAILED", message: "failure-failed" });
+    assert.deepEqual(failed.output, { status: "failed", code: "AGENT_FAILED", message: "failure-failed" });
     const oversizedResult = subagents.find((subagent) => subagent.id === "oversized-result");
     assert.deepEqual(oversizedResult?.result, { truncated: true, path: join(agentDir, "subagents", "oversized-result", "result.json"), bytes: 2 * 1024 * 1024 + 2 });
     const oversizedFailure = subagents.find((subagent) => subagent.id === "oversized-failure");
