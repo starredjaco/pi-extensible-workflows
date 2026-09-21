@@ -19,6 +19,7 @@ const AGENT_COUNT = 51;
 const TRANSCRIPT_BYTES = 1_100_000;
 const BODY_MARKER = "oversized-publisher-original-body";
 const UPDATED_BODY_MARKER = "oversized-publisher-revised-body";
+const LIVE_OUTPUT = "x".repeat(64 * 1024 + 1);
 
 type JsonRecord = Record<string, unknown>;
 type RawBrowser = {
@@ -239,7 +240,7 @@ async function createFixture(root: string): Promise<{ cwd: string; home: string;
     transcript: [],
   }] as unknown as readonly TrajectorySubagent[];
   const loadMetadata: NonNullable<TrajectoryPublisherInput["loadMetadata"]> = async () => ({
-    runs: (await loadRunMetadata()).map((value) => ({ ...value, run: { ...value.run, agents: value.run.agents.map((agent) => ({ ...agent, outcome: { kind: "result", value: "outcome-0" } })) } })) as unknown as TrajectoryPublisherMetadata["runs"],
+    runs: (await loadRunMetadata()).map((value) => ({ ...value, run: { ...value.run, agents: value.run.agents.map((agent, index) => ({ ...agent, outcome: { kind: "result", value: "outcome-0" }, ...(value.run.id === "run-0" && index === 0 ? { output: { status: "available", value: LIVE_OUTPUT, bytes: Buffer.byteLength(LIVE_OUTPUT) } } : {}) })) } })) as unknown as TrajectoryPublisherMetadata["runs"],
     subagents: subagents.map((value) => ({ ...value, transcript: { revision: 1, status: value.transcript.length ? "available" : "empty", timing: value.transcript.slice(1) } })) as unknown as TrajectoryPublisherMetadata["subagents"],
   });
   const loadPersistedTranscript = createTrajectoryTranscriptLoader(cwd, SESSION_ID, home, agentDir);
@@ -335,6 +336,7 @@ void test("Trajectory keeps a real oversized publisher alive and reconnects its 
     assert.equal((firstAgent.toolDefinitions as JsonRecord[])[0]?.name, "bash");
     assert.equal(typeof (firstAgent.toolDefinitions as JsonRecord[])[0]?.description, "string");
     assert.deepEqual(firstAgent.outcome, { kind: "result", value: "outcome-0" });
+    assert.deepEqual(firstAgent.output, { status: "truncated", kind: "result", bytes: Buffer.byteLength(LIVE_OUTPUT) });
     assert.deepEqual(firstAgent.tools, ["bash"]);
     assert.ok(firstAgent.attemptDetails);
     const firstAttempt = (firstAgent.attemptDetails as JsonRecord[])[0];

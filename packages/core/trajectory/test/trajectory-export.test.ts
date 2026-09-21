@@ -20,15 +20,17 @@ void test("exportTrajectoryRunHtml renders a self-contained static run report", 
   const model = { provider: "fixture", model: "fixture-model" };
   const run = {
     id: "run", workflowName: "trajectory-export", cwd, sessionId: "session", state: "completed", agentSessions: [],
-    agents: [{ id: "agent", name: "agent", path: "agent", state: "completed", attempts: 1, model, tools: [], attemptDetails: [{ attempt: 1, transport: "local", session: { transport: "local", sessionId: "native", locator: { sessionFile } }, setup: { cwd, hookNames: [], model, tools: [] }, accounting: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0 } }] }],
+    agents: [{ id: "agent", name: "agent", path: "agent", state: "completed", resultPath: "agent/call:1", attempts: 1, model, tools: [], attemptDetails: [{ attempt: 1, transport: "local", session: { transport: "local", sessionId: "native", locator: { sessionFile } }, setup: { cwd, hookNames: [], model, tools: [] }, accounting: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0 } }] }],
   } as unknown as PersistedRun;
   try {
     await store.create(run, createLaunchSnapshot({ script: "return true;", args: { nested: ["<img>", false] }, metadata: { name: "trajectory-export" }, settings: { concurrency: 1 }, models: ["fixture/fixture-model"], tools: [], agentTypes: [], roles: {}, schemas: [] }));
+    await store.complete("agent/call:1", { answer: false });
     const html = await exportTrajectoryRunHtml({ cwd, sessionId: "session", runId: "run", home });
     assert.match(html, /window\.__PIEWF_STATIC__ = \{"type":"state"/);
     assert.ok(html.includes('"workflowName":"trajectory-export"'));
     assert.ok(html.includes('"connected":true'));
     assert.ok(html.includes('"args":{"nested":["\\u003cimg>",false]}'));
+    assert.ok(html.includes('"output":{"status":"available","value":{"answer":false}'));
     // Transcript entries travel inline so the agent view works without a server.
     assert.ok(html.includes("hello \\u003c/script> world"));
     // No relative asset references survive; scripts and favicon are data URLs.

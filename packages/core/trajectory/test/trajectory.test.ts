@@ -21,17 +21,48 @@ void test("trajectory maps authoritative journal results to the selected agent o
   const run = { agents: [
     { id: "first", state: "completed", resultPath: "agent/handle/author/turn:1", attempts: 1 },
     { id: "second", state: "completed", resultPath: "agent/handle/author/turn:2", attempts: 1 },
+    { id: "null", state: "completed", resultPath: "agent/null", attempts: 1 },
+    { id: "zero", state: "completed", resultPath: "agent/zero", attempts: 1 },
+    { id: "empty", state: "completed", resultPath: "agent/empty", attempts: 1 },
     { id: "failed", state: "failed", resultPath: "agent/failed", attempts: 1, attemptDetails: [{ attempt: 1, error: { code: "FAILED", message: "no" } }] },
+    { id: "cancelled", state: "cancelled", attempts: 1, attemptDetails: [{ attempt: 1, error: { code: "CANCELLED", message: "stopped" } }] },
     { id: "legacy", state: "completed", attempts: 1 },
   ] } as unknown as PersistedRun;
   const next = applyTrajectoryAgentOutputs(run, [
     { path: "agent/handle/author/turn:1", value: false },
     { path: "agent/handle/author/turn:2", value: { answer: 42 } },
+    { path: "agent/null", value: null },
+    { path: "agent/zero", value: 0 },
+    { path: "agent/empty", value: "" },
   ]);
   assert.deepEqual((next.agents[0] as { output?: unknown }).output, { status: "available", value: false, bytes: 5 });
   assert.deepEqual((next.agents[1] as { output?: unknown }).output, { status: "available", value: { answer: 42 }, bytes: 13 });
-  assert.deepEqual((next.agents[2] as { output?: unknown }).output, { status: "failed", code: "FAILED", message: "no" });
-  assert.deepEqual((next.agents[3] as { output?: unknown }).output, { status: "unavailable" });
+  assert.deepEqual(next.agents[2]?.output, { status: "available", value: null, bytes: 4 });
+  assert.deepEqual(next.agents[3]?.output, { status: "available", value: 0, bytes: 1 });
+  assert.deepEqual(next.agents[4]?.output, { status: "available", value: "", bytes: 2 });
+  assert.deepEqual(next.agents[5]?.output, { status: "failed", code: "FAILED", message: "no" });
+  assert.deepEqual(next.agents[6]?.output, { status: "cancelled", code: "CANCELLED", message: "stopped" });
+  assert.deepEqual(next.agents[7]?.output, { status: "unavailable" });
+});
+
+void test("trajectory keeps runs with unavailable retry lineage visible", async () => {
+  const root = mkdtempSync(join(tmpdir(), "pi-extensible-workflows-trajectory-retry-lineage-"));
+  const cwd = join(root, "project");
+  const home = join(root, "home");
+  mkdirSync(cwd, { recursive: true });
+  const store = new RunStore(cwd, "session", "run", home);
+  const model = { provider: "fixture", model: "fixture-model" };
+  const run = {
+    id: "run", workflowName: "trajectory", cwd, sessionId: "session", state: "completed", agentSessions: [],
+    retry: { sourceRunId: "missing", lineageRootRunId: "missing", completedPaths: [], incompletePaths: [], namedWorktrees: [] },
+    agents: [{ id: "agent", name: "agent", path: "agent", state: "completed", attempts: 1, model, tools: [] }],
+  } as unknown as PersistedRun;
+  try {
+    await store.create(run, createLaunchSnapshot({ script: "return true;", args: null, metadata: { name: "trajectory" }, settings: { concurrency: 1 }, models: ["fixture/fixture-model"], tools: [], agentTypes: [], roles: {}, schemas: [] }));
+    const loaded = await createTrajectoryRunLoader(cwd, "session", home)();
+    assert.equal(loaded.length, 1);
+    assert.deepEqual(loaded[0]?.run.agents[0]?.output, { status: "unavailable" });
+  } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
 void test("applyToolDescriptions fills missing Pi tool descriptions", () => {
@@ -902,6 +933,60 @@ void test("Trajectory renders subagents through the same agent view as workflow 
   assert.match(source, /setInterval\(tickClocks, 1000\)/);
   assert.doesNotMatch(source, /setInterval\(\(\) => \{ if \(document\.body\.dataset\.view === "run"\) renderRun\(\); \}, 1000\)/);
 });
+void test("Trajectory output inspector distinguishes states and safely renders values", () => {
+  const source = readFileSync(new URL("../src/assets/index.html", import.meta.url), "utf8");
+  const helperStart = source.indexOf("    function subagentOutputFallback");
+  const helperEnd = source.indexOf("    function renderSystemPane", helperStart);
+  assert.ok(helperStart >= 0 && helperEnd > helperStart);
+  const helpers = runInNewContext(`(() => { const esc = (value) => String(value ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;"); const json = (value) => JSON.stringify(value); ${source.slice(helperStart, helperEnd)}; return { renderOutputPane, outputForInspector, subagentOutputFallback }; })()`) as {
+    renderOutputPane: (agent: Record<string, unknown>) => string;
+    outputForInspector: (agent: Record<string, unknown>) => Record<string, unknown>;
+    subagentOutputFallback: (agent: Record<string, unknown>) => Record<string, unknown>;
+  };
+  assert.match(helpers.renderOutputPane({ output: { status: "available", value: "<script>", bytes: 8 } }), /&lt;script&gt;/);
+  assert.match(helpers.renderOutputPane({ output: { status: "available", value: false, bytes: 5 } }), />false</);
+  assert.match(helpers.renderOutputPane({ output: { status: "available", value: null, bytes: 4 } }), />null</);
+  assert.match(helpers.renderOutputPane({ output: { status: "available", value: { answer: 0 }, bytes: 13 } }), /&quot;answer&quot;:0/);
+  assert.match(helpers.renderOutputPane({ output: { status: "pending" } }), /not yet available/);
+  assert.match(helpers.renderOutputPane({ output: { status: "unavailable" } }), /Output unavailable/);
+  assert.match(helpers.renderOutputPane({ output: { status: "truncated", kind: "result", bytes: 70 } }), /truncated/);
+  assert.match(helpers.renderOutputPane({ output: { status: "failed", code: "FAILED", message: "<failure>" } }), /&lt;failure&gt;/);
+  assert.deepEqual(JSON.parse(JSON.stringify(helpers.outputForInspector({ state: "queued" }))), { status: "unavailable" });
+  assert.deepEqual(JSON.parse(JSON.stringify(helpers.subagentOutputFallback({ state: "queued" }))), { status: "unavailable" });
+});
+
+void test("Trajectory refreshes output in the selected agent tab", () => {
+  const source = readFileSync(new URL("../src/assets/index.html", import.meta.url), "utf8");
+  const helperStart = source.indexOf("    function outputForInspector");
+  const helperEnd = source.indexOf("    function renderSystemPromptPane", helperStart);
+  assert.ok(helperStart >= 0 && helperEnd > helperStart);
+  const pane = { innerHTML: "" };
+  const tabs = { querySelectorAll: () => [] };
+  const state = { sysPane: "output" };
+  const helpers = runInNewContext(`(() => { const esc = (value) => String(value ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;"); const json = (value) => JSON.stringify(value); const $ = (id) => id === "sys-pane" ? pane : tabs; const patch = (root, html) => { root.innerHTML = html; }; const sessionResources = () => ({ skillFilters: [], skillResolved: [], extensionFilters: [], extensionResolved: [] }); const estTokens = () => 0; const sanitizeMarkdown = (value) => value; const marked = { parse: (value) => value }; const nameList = () => ""; const resourceList = () => ""; const selected = () => undefined; ${source.slice(helperStart, helperEnd)}; return { renderSystemPane }; })()`, { pane, tabs, state }) as { renderSystemPane: (agent: Record<string, unknown>) => void };
+  const agent: Record<string, unknown> = { name: "agent", state: "running", tools: [], output: { status: "pending" } };
+  helpers.renderSystemPane(agent);
+  assert.match(pane.innerHTML, /not yet available/);
+  assert.equal(state.sysPane, "output");
+  agent.output = { status: "available", value: { answer: "done" }, bytes: 16 };
+  helpers.renderSystemPane(agent);
+  assert.match(pane.innerHTML, /&quot;answer&quot;:&quot;done&quot;/);
+  assert.equal(state.sysPane, "output");
+});
+
+void test("Trajectory Agent details switches back from event inspection", () => {
+  const source = readFileSync(new URL("../src/assets/index.html", import.meta.url), "utf8");
+  const start = source.indexOf("if (target.dataset.agentDetails !== undefined)");
+  const end = source.indexOf("if (target.dataset.script)", start);
+  assert.ok(start >= 0 && end > start);
+  const state = { inspMode: "event", inspSig: "stale" };
+  let renders = 0;
+  runInNewContext(`(() => { ${source.slice(start, end)} })()`, { target: { dataset: { agentDetails: "1" } }, state, renderAgent: () => { renders += 1; } });
+  assert.deepEqual(state, { inspMode: "agent", inspSig: null });
+  assert.equal(renders, 1);
+  assert.match(source, /agent\.state\}:\$\{agent\.attempts/);
+});
+
 void test("Trajectory subagent Gantt gives running and finished lanes tool geometry", () => {
   const source = readFileSync(new URL("../src/assets/index.html", import.meta.url), "utf8");
   const helperStart = source.indexOf("    const timingEntryType");

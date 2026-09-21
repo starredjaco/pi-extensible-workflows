@@ -5,7 +5,7 @@ import { basename, dirname, join, resolve } from "node:path";
 import { createBashToolDefinition, createEditToolDefinition, createFindToolDefinition, createGrepToolDefinition, createLsToolDefinition, createReadToolDefinition, createWriteToolDefinition, DefaultPackageManager, getAgentDir, SettingsManager, DEFAULT_MAX_BYTES } from "@earendil-works/pi-coding-agent";
 import { listRunIds, RunStore, type AwaitingCheckpoint, type CompletedOperation, type EffectiveSystemPrompt, type PersistedRun } from "./persistence.js";
 import { navigatorAttentionSortByState } from "./host-view.js";
-import type { AgentAttemptSummary, JsonValue, LaunchSnapshot, WorkflowAgentSessionReference } from "./types.js";
+import type { AgentAttemptSummary, AgentRecord, JsonValue, LaunchSnapshot, WorkflowAgentSessionReference } from "./types.js";
 import { normalizeSubagentRunRequest, type SubagentProgress, type SubagentRunRequest, type SubagentStatus } from "../subagents/src/contracts.js";
 import { statusValue, subagentErrorValue } from "../subagents/src/decode.js";
 import { isNodeError, jsonValue, object, resourcePatternHasMagic, selectResourcesByLayers } from "./utils.js";
@@ -21,8 +21,10 @@ export type TrajectoryAgentOutput =
   | { readonly status: "failed" | "cancelled"; readonly code: string; readonly message: string }
   | { readonly status: "truncated"; readonly kind: "result" | "failure"; readonly bytes: number; readonly path?: string }
   | { readonly status: "unavailable" };
+export type TrajectoryAgent = AgentRecord & { readonly output: TrajectoryAgentOutput };
+export type TrajectoryRunRecord = Omit<PersistedRun, "agents"> & { readonly agents: readonly TrajectoryAgent[] };
 export type TrajectoryRun = {
-  run: PersistedRun;
+  run: TrajectoryRunRecord;
   snapshot: Readonly<LaunchSnapshot>;
   awaiting: readonly AwaitingCheckpoint[];
   createdAt?: string;
@@ -32,16 +34,29 @@ export type TrajectoryTranscriptStatus = "available" | "empty" | "missing" | "fa
 export type TrajectoryTranscriptMetadata = { readonly revision: number; readonly status: TrajectoryTranscriptStatus; readonly bytes?: number; readonly timing?: readonly unknown[]; };
 export type TrajectoryRunMetadata = Omit<TrajectoryRun, "transcripts"> & { transcripts: Readonly<Record<string, TrajectoryTranscriptMetadata>> };
 export type TrajectorySubagentArtifact = { readonly truncated: true; readonly path: string; readonly bytes: number };
-function subagentOutput(state: SubagentStatus["state"], statusError: SubagentStatus["error"], attempt: AgentAttemptSummary | undefined, result: JsonValue | undefined, resultTruncated: boolean, resultPath: string, resultBytes: number | undefined, failure: { readonly code: string; readonly message: string } | undefined, failureTruncated: boolean, failurePath: string, failureBytes: number | undefined): TrajectoryAgentOutput {
-  if (resultTruncated) return { status: "truncated", kind: "result", path: resultPath, bytes: resultBytes ?? 0 };
-  if (result !== undefined) return { status: "available", value: result, bytes: serializedJsonBytes(result) };
-  if (failureTruncated) return { status: "truncated", kind: "failure", path: failurePath, bytes: failureBytes ?? 0 };
-  if (failure !== undefined) return { status: "failed", code: failure.code, message: failure.message };
-  if (state === "failed" || state === "stopped") {
-    const error = statusError ?? attempt?.error;
-    return { status: state === "stopped" ? "cancelled" : "failed", code: error?.code ?? (state === "stopped" ? "CANCELLED" : "AGENT_FAILED"), message: error?.message ?? `Subagent ${state}` };
+type SubagentOutputOptions = {
+  readonly state: SubagentStatus["state"];
+  readonly statusError: SubagentStatus["error"];
+  readonly attempt: AgentAttemptSummary | undefined;
+  readonly result: JsonValue | undefined;
+  readonly resultTruncated: boolean;
+  readonly resultPath: string;
+  readonly resultBytes: number | undefined;
+  readonly failure: { readonly code: string; readonly message: string } | undefined;
+  readonly failureTruncated: boolean;
+  readonly failurePath: string;
+  readonly failureBytes: number | undefined;
+};
+function subagentOutput(options: SubagentOutputOptions): TrajectoryAgentOutput {
+  if (options.resultTruncated) return { status: "truncated", kind: "result", path: options.resultPath, bytes: options.resultBytes ?? 0 };
+  if (options.result !== undefined) return { status: "available", value: options.result, bytes: serializedJsonBytes(options.result) };
+  if (options.failureTruncated) return { status: "truncated", kind: "failure", path: options.failurePath, bytes: options.failureBytes ?? 0 };
+  if (options.failure !== undefined) return { status: "failed", code: options.failure.code, message: options.failure.message };
+  if (options.state === "failed" || options.state === "stopped") {
+    const error = options.statusError ?? options.attempt?.error;
+    return { status: options.state === "stopped" ? "cancelled" : "failed", code: error?.code ?? (options.state === "stopped" ? "CANCELLED" : "AGENT_FAILED"), message: error?.message ?? `Subagent ${options.state}` };
   }
-  if (state === "completed") return { status: "unavailable" };
+  if (options.state === "completed") return { status: "unavailable" };
   return { status: "pending" };
 }
 export type TrajectorySubagent = {
@@ -314,17 +329,28 @@ function outputForAgent(agent: PersistedRun["agents"][number], operation: Comple
   if (agent.state === "completed") return { status: "unavailable" };
   return { status: "pending" };
 }
-export function applyTrajectoryAgentOutputs(run: PersistedRun, operations: readonly CompletedOperation[]): PersistedRun {
+export function applyTrajectoryAgentOutputs(run: PersistedRun, operations: readonly CompletedOperation[]): TrajectoryRunRecord {
   const byPath = new Map(operations.map((operation) => [operation.path, operation]));
-  const agents = run.agents.map((agent) => ({ ...agent, output: outputForAgent(agent, agent.resultPath === undefined ? undefined : byPath.get(agent.resultPath)) }));
+  const agents: readonly TrajectoryAgent[] = run.agents.map((agent) => ({ ...agent, output: outputForAgent(agent, agent.resultPath === undefined ? undefined : byPath.get(agent.resultPath)) }));
   return { ...run, agents };
+}
+function overlayTrajectoryRun(run: TrajectoryRunRecord, overlay: (run: PersistedRun) => PersistedRun): TrajectoryRunRecord {
+  const overlaid = overlay(run);
+  const outputs = new Map(run.agents.map((agent) => [agent.id, agent.output]));
+  const agents: readonly TrajectoryAgent[] = overlaid.agents.map((agent) => {
+    const previous = outputs.get(agent.id);
+    const output = previous?.status === "available" || previous?.status === "truncated" ? previous : outputForAgent(agent, undefined);
+    return { ...agent, output };
+  });
+  return { ...overlaid, agents };
 }
 async function loadTrajectoryRun(store: RunStore, includeTranscripts = true): Promise<TrajectoryRun> {
   const value = await store.load();
   const summary = await store.loadSummary().catch(() => undefined);
   const prompts = await store.systemPrompts().catch(() => []);
   const prepared = withoutAgentActivities(await withResolvedResources(withPiToolDescriptions(applySystemPrompts(value.run, prompts)), store.cwd));
-  const run = applyTrajectoryAgentOutputs(prepared, await store.replayableOperations());
+  const operations = await store.replayableOperations().catch(() => []);
+  const run = applyTrajectoryAgentOutputs(prepared, operations);
   return { run, snapshot: value.snapshot, awaiting: await store.awaitingCheckpoints(), ...(summary?.createdAt === undefined ? {} : { createdAt: summary.createdAt }), transcripts: includeTranscripts ? await runTranscripts(run) : {} };
 }
 
@@ -333,7 +359,7 @@ export async function loadTrajectoryRuns(cwd: string, sessionId: string, home = 
   for (const runId of await listRunIds(cwd, sessionId, home, false)) {
     try {
       const value = await loadTrajectoryRun(new RunStore(cwd, sessionId, runId, home));
-      loaded.push(overlay ? { ...value, run: overlay(value.run) } : value);
+      loaded.push(overlay ? { ...value, run: overlayTrajectoryRun(value.run, overlay) } : value);
     } catch { /* Ignore corrupt or concurrently removed runs. */ }
   }
   return loaded;
@@ -366,7 +392,7 @@ function createCachedRunLoader<Value extends { run: PersistedRun }, Signature>(c
           entry = { value, stateMtimeMs: (await fileMtime(join(store.directory, "state.json"))) ?? 0, journalMtimeMs: (await fileMtime(join(store.directory, "journal.json"))) ?? 0, transcripts };
           cache.set(runId, entry);
         }
-        loaded.push(overlay ? { ...entry.value, run: overlay(entry.value.run) } : entry.value);
+        loaded.push(overlay ? { ...entry.value, run: overlayTrajectoryRun(entry.value.run as TrajectoryRunRecord, overlay) } : entry.value);
       } catch { cache.delete(runId); /* Ignore corrupt or concurrently removed runs. */ }
     }
     return loaded;
@@ -533,7 +559,7 @@ async function loadTrajectorySubagent(directory: string, cwd: string, sessionId:
       ...(attempt === undefined ? {} : { attempt }),
       ...(result === undefined ? {} : { result }),
       ...(failure === undefined ? {} : { failure }),
-      output: subagentOutput(status.state, status.error, attempt, resultValue === undefined ? undefined : boundedSubagentJson(resultValue), resultTruncated, resultPath, resultBytes, failureValue === undefined ? undefined : subagentErrorValue(failureValue), failureTruncated, failurePath, failureBytes),
+      output: subagentOutput({ state: status.state, statusError: status.error, attempt, result: resultValue === undefined ? undefined : boundedSubagentJson(resultValue), resultTruncated, resultPath, resultBytes, failure: failureValue === undefined ? undefined : subagentErrorValue(failureValue), failureTruncated, failurePath, failureBytes }),
     };
   } catch { return undefined; }
 }

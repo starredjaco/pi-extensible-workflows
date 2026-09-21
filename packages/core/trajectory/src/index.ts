@@ -197,6 +197,20 @@ const MAX_LIVE_OBJECT_KEYS = 64;
 const LIVE_METADATA_ARRAY_KEYS = new Set(["agents", "runs", "subagents"]);
 const LIVE_TRUNCATABLE_ARRAY_KEYS = new Set(["events", "phaseHistory"]);
 const LIVE_METADATA_OBJECT_KEYS = new Set(["transcripts"]);
+function liveValueWillBeBounded(value: unknown, key = "", depth = 0): boolean {
+  if (typeof value === "string") return Buffer.byteLength(value) > MAX_LIVE_STRING_BYTES;
+  if (typeof value !== "object" || value === null) return false;
+  if (depth >= 12) return true;
+  if (Array.isArray(value)) {
+    const maxEntries = LIVE_TRUNCATABLE_ARRAY_KEYS.has(key) ? MAX_LIVE_ARRAY_ENTRIES - 1 : MAX_LIVE_ARRAY_ENTRIES;
+    if (key === "attemptDetails" && value.length > 8 || !LIVE_METADATA_ARRAY_KEYS.has(key) && value.length > maxEntries) return true;
+    return value.some((entry) => liveValueWillBeBounded(entry, "", depth + 1));
+  }
+  if (!object(value)) return false;
+  const properties = LIVE_METADATA_OBJECT_KEYS.has(key) ? Object.keys(value) : Object.keys(value).sort().slice(0, MAX_LIVE_OBJECT_KEYS);
+  if (!LIVE_METADATA_OBJECT_KEYS.has(key) && Object.keys(value).length > MAX_LIVE_OBJECT_KEYS) return true;
+  return properties.some((property) => liveValueWillBeBounded(value[property], property, depth + 1));
+}
 function boundedTiming(value: unknown): unknown[] {
   const entries = Array.isArray(value) ? value.filter(isTimingEntry) : [];
   const retained: unknown[] = [];
@@ -225,6 +239,10 @@ function boundedLiveValue(value: unknown, key = "", depth = 0, bounds?: LiveBoun
     if (typeof value === "number" || typeof value === "boolean" || value === null) return value;
     if (depth >= 12) { markArgsTruncated(); return undefined; }
     if (key === "timing" && !argsValue) return boundedTiming(value);
+    if (key === "output" && object(value) && value.status === "available") {
+      const boundedOutput = boundedLiveValue(value.value, "value", depth + 1, bounds);
+      return liveValueWillBeBounded(value.value, "value", depth + 1) ? { status: "truncated", kind: "result", bytes: value.bytes } : { ...value, value: boundedOutput };
+    }
     if (Array.isArray(value)) {
       const array = value as readonly unknown[];
       const maxEntries = !argsValue && LIVE_TRUNCATABLE_ARRAY_KEYS.has(key) ? MAX_LIVE_ARRAY_ENTRIES - 1 : MAX_LIVE_ARRAY_ENTRIES;
