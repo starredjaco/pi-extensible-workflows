@@ -35,7 +35,6 @@ import {
   workflowControlCall,
   workflowControlResult,
   workflowProgressBlock,
-  formatWorkflowProgress,
   type WorkflowProgressRenderState,
 } from "./host-view.js";
 import {
@@ -177,7 +176,9 @@ export const WORKFLOW_STATUS_PARAMETERS = Type.Object({ runId: Type.String({ des
 export const WORKFLOW_RETRY_PARAMETERS = Type.Object({ runId: Type.String({ description: "Explicit failed workflow run ID" }), expectedState: Type.Optional(Type.String({ description: "Persisted source state observed before recovery" })), foreground: Type.Optional(Type.Boolean({ description: "Override the source launch mode for this recovery" })) });
 
 function workflowToolUpdate(run: PersistedRun): WorkflowToolUpdate {
-  return { content: [{ type: "text", text: formatWorkflowProgress(run) }], details: { runId: run.id, run } };
+  //NOTE: renderers read details.run; the partial text stays O(1) so high-frequency updates never format the whole tree.
+  const done = run.agents.filter((agent) => SETTLED_AGENT_STATES.has(agent.state)).length;
+  return { content: [{ type: "text", text: `Workflow: ${run.workflowName} (${String(done)}/${String(run.agents.length)} done) [${run.state}]` }], details: { runId: run.id, run } };
 }
 function agentWithProgress(agent: AgentRecord, progress: AgentProgress): AgentRecord {
   const next = { ...agent, accounting: progress.accounting, toolCalls: progress.toolCalls };
@@ -201,6 +202,7 @@ function deliver(pi: WorkflowExtensionAPI, content: string): void {
   pi.sendMessage({ customType: "workflow", content, display: true }, { deliverAs: "followUp", triggerTurn: true });
 }
 const WORKFLOW_WARNING_ENTRY = "workflow-warning";
+const PROGRESS_COALESCE_MS = 100;
 interface WorkflowWarningEntry { message: string }
 function deliverWarning(pi: WorkflowExtensionAPI, content: string): void {
   pi.appendEntry<WorkflowWarningEntry>(WORKFLOW_WARNING_ENTRY, { message: content });
@@ -587,22 +589,49 @@ export default function workflowExtension(pi: WorkflowExtensionAPI, home?: strin
   const scheduler = new FairAgentScheduler(async ({ id, runId, tuiIndex, parentId, prompt, options, signal, setSteer }) => {
     const run = runs.get(runId);
     if (!run) throw new WorkflowError("INTERNAL_ERROR", `Unknown production run: ${runId}`);
+    const applyProgress = async (progress: AgentProgress) => {
+      let runState: PersistedRun;
+      if (progress.persist) {
+        runState = await persistRunState(run.store, run.metadata, (current) => current.agents.some((agent) => agent.id === id) ? { ...current, ...run.budget.snapshot(), agents: current.agents.map((agent) => agent.id === id ? agentWithProgress(agent, progress) : agent) } : current);
+      } else {
+        const loaded = await run.store.loadStatus();
+        if (!loaded.agents.some((agent) => agent.id === id)) return;
+        runState = { ...loaded, ...run.budget.snapshot(), agents: loaded.agents.map((agent) => agent.id === id ? agentWithProgress(agent, progress) : agent) };
+      }
+      if (!runState.agents.some((agent) => agent.id === id)) return;
+      liveAgents.setActivity(runId, id, progress.activity);
+      liveAgents.setEventTime(runId, id, progress.lastEventAt);
+      run.update?.(workflowToolUpdate(withLiveActivities(runState)));
+    };
+    // Display-only progress bursts coalesce to one trailing apply per window; persisted progress always applies immediately.
+    let deferred: AgentProgress | undefined;
+    let deferredTimer: NodeJS.Timeout | undefined;
+    let appliedAt = 0;
+    const cancelDeferredProgress = () => {
+      if (deferredTimer) clearTimeout(deferredTimer);
+      deferredTimer = undefined;
+      deferred = undefined;
+    };
+    const onProgress = async (progress: AgentProgress) => {
+      const now = Date.now();
+      if (progress.persist || (!deferredTimer && now - appliedAt >= PROGRESS_COALESCE_MS)) {
+        cancelDeferredProgress();
+        appliedAt = now;
+        await applyProgress(progress);
+        return;
+      }
+      deferred = progress;
+      deferredTimer ??= setTimeout(() => {
+        deferredTimer = undefined;
+        const next = deferred;
+        deferred = undefined;
+        if (!next) return;
+        appliedAt = Date.now();
+        void applyProgress(next).catch(() => undefined);
+      }, Math.max(0, PROGRESS_COALESCE_MS - (now - appliedAt))).unref();
+    };
     try {
       const budget = run.budget.forAgent(id);
-      const onProgress = async (progress: AgentProgress) => {
-        let runState: PersistedRun;
-        if (progress.persist) {
-          runState = await persistRunState(run.store, run.metadata, (current) => current.agents.some((agent) => agent.id === id) ? { ...current, ...run.budget.snapshot(), agents: current.agents.map((agent) => agent.id === id ? agentWithProgress(agent, progress) : agent) } : current);
-        } else {
-          const loaded = await run.store.load();
-          if (!loaded.run.agents.some((agent) => agent.id === id)) return;
-          runState = { ...loaded.run, ...run.budget.snapshot(), agents: loaded.run.agents.map((agent) => agent.id === id ? agentWithProgress(agent, progress) : agent) };
-        }
-        if (!runState.agents.some((agent) => agent.id === id)) return;
-        liveAgents.setActivity(runId, id, progress.activity);
-        liveAgents.setEventTime(runId, id, progress.lastEventAt);
-        run.update?.(workflowToolUpdate(withLiveActivities(runState)));
-      };
       const onAttempt = async (attempt: AgentAttempt) => {
         liveAgents.setSession(runId, id, attempt.liveSession);
         liveAgents.setHandoff(runId, id, attempt);
@@ -619,6 +648,7 @@ export default function workflowExtension(pi: WorkflowExtensionAPI, home?: strin
         run.update?.(workflowToolUpdate(withLiveActivities(persisted)));
       };
       const result = await run.executor.execute(prompt, { label: options.label, workflowName: run.metadata.name, tuiIndex, tuiLabel: options.requestedLabel ?? options.label, agentNodeId: id, ...(options.extensionSettings === undefined ? {} : { inheritedExtensionSettings: options.extensionSettings }), onProgress, onAttempt, budget, ...(run.providerErrorRecovery ? { providerErrorRecovery: run.providerErrorRecovery } : {}), ...(parentId ? { parent: parentId, cwd: options.cwd, ...(options.worktreeOwner ? { worktreeOwner: options.worktreeOwner } : {}) } : options.worktreeOwner ? { worktreeOwner: options.worktreeOwner } : {}), ...(options.model ? { model: options.model } : {}), ...(options.role ? { role: options.role } : {}), ...(options.contextFiles ? { contextFiles: options.contextFiles } : {}), tools: options.tools, ...(options.skills ? { skills: options.skills } : {}), ...(options.extensions ? { extensions: options.extensions } : {}), effectiveTools: options.tools, ...(options.schema ? { schema: options.schema } : {}), ...(options.retries === undefined ? {} : { retries: options.retries }), ...(options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs }), ...(options.sessionPath ? { sessionPath: options.sessionPath } : {}), ...(options.agentOptions ? { agentOptions: options.agentOptions } : {}), ...(options.agentIdentity ? { agentIdentity: options.agentIdentity } : {}) }, signal, scheduler.toolsFor(id, (role, tools, model, inheritedTools, skills, extensions) => run.executor.resolve({ label: "child", workflowName: run.metadata.name, ...(model ? { model } : {}), ...(role ? { role } : {}), ...(tools !== undefined ? { tools } : {}), ...(skills !== undefined ? { skills } : {}), ...(extensions !== undefined ? { extensions } : {}) }, inheritedTools).tools), setSteer, () => { scheduler.cancelChildren(id); scheduler.retry(id); });
+      cancelDeferredProgress();
       const before = (await run.store.load()).run;
       await persistAgentAttempts(run.store, id, result.attempts);
       const completed = (await run.store.load()).run;
@@ -629,6 +659,7 @@ export default function workflowExtension(pi: WorkflowExtensionAPI, home?: strin
       run.update?.(workflowToolUpdate(withLiveActivities(persisted)));
       return result.value;
     } catch (error) {
+      cancelDeferredProgress();
       liveAgents.setSession(runId, id);
       const attempts = getAgentAttempts(error);
       if (attempts?.length) {
@@ -1366,8 +1397,7 @@ export default function workflowExtension(pi: WorkflowExtensionAPI, home?: strin
           state.workflowProgressComponent = workflowProgressBlock(currentProgress?.run ?? incoming, theme, currentProgress, async () => {
             const active = runs.get(incoming.id);
             const store = active?.store ?? new RunStore(incoming.cwd, incoming.sessionId, incoming.id, home);
-            const loaded = await store.load();
-            return withLiveActivities(loaded.run);
+            return withLiveActivities(await store.loadStatus());
           }, () => { if (state.workflowProgress === currentProgress) requestRender(); }, undefined, state.workflowProgressFrozenAt);
         }
         state.workflowProgressComponent.setExpanded(expanded);

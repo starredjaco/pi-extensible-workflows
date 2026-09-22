@@ -14,11 +14,11 @@ export default tseslint.config(
     rules: { "@typescript-eslint/require-await": "off" },
   },
   {
-    files: ["scripts/**/*.mjs", "packages/core/test/**/*.mjs", "packages/core/subagents/**/*.mjs", "packages/extensions/herdr/**/*.js", "packages/extensions/herdr/**/*.mjs"],
+    files: ["scripts/**/*.mjs", "packages/core/bench/**/*.mjs", "packages/core/test/**/*.mjs", "packages/core/subagents/**/*.mjs", "packages/extensions/herdr/**/*.js", "packages/extensions/herdr/**/*.mjs"],
     ...tseslint.configs.disableTypeChecked,
     languageOptions: {
       parserOptions: { project: false, projectService: false },
-      globals: { process: "readonly", AbortController: "readonly" },
+      globals: { process: "readonly", AbortController: "readonly", console: "readonly", performance: "readonly" },
     },
   },
 );
