@@ -18,7 +18,13 @@ export default tseslint.config(
     ...tseslint.configs.disableTypeChecked,
     languageOptions: {
       parserOptions: { project: false, projectService: false },
-      globals: { process: "readonly", AbortController: "readonly", console: "readonly", performance: "readonly" },
+      globals: { process: "readonly", AbortController: "readonly" },
+    },
+  },
+  {
+    files: ["packages/core/bench/**/*.mjs"],
+    languageOptions: {
+      globals: { console: "readonly", performance: "readonly", setTimeout: "readonly", clearTimeout: "readonly", setInterval: "readonly", clearInterval: "readonly", fetch: "readonly", WebSocket: "readonly", Buffer: "readonly" },
     },
   },
 );

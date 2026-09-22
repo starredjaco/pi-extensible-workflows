@@ -1084,9 +1084,9 @@ void test("Trajectory run rendering preserves the dossier scroll across re-rende
   const end = source.indexOf("    function renderAgent()", start);
   assert.ok(start >= 0 && end > start);
   const body = source.slice(start, end);
-  // The dossier is rewritten on every state frame, so the scroll must be restored around the patch.
+  // The dossier is rewritten whenever its markup changes, so the scroll must be restored around the patch.
   assert.match(body, /const dossierBody = \$\("insp"\)\.querySelector\("\.ins-body"\); const dossierScroll = dossierBody \? dossierBody\.scrollTop : 0;/);
-  assert.match(body, /patch\(\$\("insp"\), renderDossier\(publisher, record\)\); const nextDossierBody = \$\("insp"\)\.querySelector\("\.ins-body"\); if \(nextDossierBody && dossierScroll\) nextDossierBody\.scrollTop = dossierScroll;/);
+  assert.match(body, /patchRun\("insp", renderDossier\(publisher, record\)\); const nextDossierBody = \$\("insp"\)\.querySelector\("\.ins-body"\); if \(nextDossierBody && dossierScroll\) nextDossierBody\.scrollTop = dossierScroll;/);
 });
 
 void test("Trajectory timeline clicks highlight the matching transcript event", () => {

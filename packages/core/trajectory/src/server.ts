@@ -9,7 +9,8 @@ const TRAJECTORY_IDLE_EXIT_MS = 5 * 60 * 1000;
 
 type Socket = import("node:stream").Duplex;
 type ClientKind = "publisher" | "browser";
-type Client = { socket: Socket; kind: ClientKind; publisherId?: string; buffer: Buffer; pendingState: Buffer | undefined; backpressured: boolean; superseded: boolean };
+type RunFocus = { publisherId: string; runId: string };
+type Client = { socket: Socket; kind: ClientKind; publisherId?: string; buffer: Buffer; pendingState: Buffer | undefined; backpressured: boolean; superseded: boolean; focusAware?: boolean; focus?: RunFocus };
 type State = { type: "state"; publishers: readonly unknown[]; updatedAt: number; initial?: boolean; truncated?: boolean };
 type PendingRequest = { requestId: string; kind: "transcript" | "action"; browser: Client; publisherId: string; publisher: Client; target: { runId?: string; agentId?: string; subagentId?: string; revision?: number }; timer: ReturnType<typeof setTimeout> };
 const MAX_FRAME_BYTES = 32 * 1024 * 1024;
@@ -38,6 +39,31 @@ function compactSubagent(subagent: unknown): unknown {
   if (!subagent || typeof subagent !== "object" || Array.isArray(subagent)) return subagent;
   const record = subagent as { transcript?: unknown };
   return { ...record, transcript: compactTranscript(record.transcript) };
+}
+function withoutTiming(run: unknown): unknown {
+  if (!run || typeof run !== "object" || Array.isArray(run)) return run;
+  const record = run as { transcripts?: unknown };
+  if (!record.transcripts || typeof record.transcripts !== "object" || Array.isArray(record.transcripts)) return run;
+  const transcripts: Record<string, unknown> = {};
+  for (const [id, entry] of Object.entries(record.transcripts as Record<string, unknown>)) transcripts[id] = entry && typeof entry === "object" && !Array.isArray(entry) ? { ...entry, timing: [] } : entry;
+  return { ...record, transcripts };
+}
+/** Tool-timing only drives the focused run's gantt, so every other run ships without it. */
+function focusedState(state: State, focus: RunFocus | undefined): State {
+  return {
+    ...state,
+    publishers: state.publishers.map((publisher) => {
+      if (!publisher || typeof publisher !== "object" || Array.isArray(publisher)) return publisher;
+      const value = publisher as { id?: unknown; runs?: unknown };
+      const runs: readonly unknown[] | undefined = Array.isArray(value.runs) ? value.runs as readonly unknown[] : undefined;
+      if (!runs) return publisher;
+      const focusedPublisher = focus !== undefined && value.id === focus.publisherId;
+      return { ...value, runs: runs.map((run) => {
+        const id = run && typeof run === "object" && !Array.isArray(run) ? (run as { run?: { id?: unknown } }).run?.id : undefined;
+        return focusedPublisher && id === focus.runId ? run : withoutTiming(run);
+      }) };
+    }),
+  };
 }
 function compactPublishers(publishers: readonly unknown[]): unknown[] {
   return publishers.map((publisher) => {
@@ -234,8 +260,17 @@ export function createTrajectoryServer(port: number, lockPath: string, options: 
   const broadcast = (value: unknown) => {
     if (isState(value)) {
       try {
-        const stateFrame = frame(encodeState(value, maxFrameBytes), maxFrameBytes);
-        for (const client of clients) if (client.kind === "browser") writeFrame(client, stateFrame, true);
+        const frames = new Map<string, Buffer>();
+        for (const client of clients) {
+          if (client.kind !== "browser") continue;
+          const key = client.focusAware === true ? `${client.focus?.publisherId ?? ""}\t${client.focus?.runId ?? ""}` : "*";
+          let stateFrame = frames.get(key);
+          if (!stateFrame) {
+            stateFrame = frame(encodeState(client.focusAware === true ? focusedState(value, client.focus) : value, maxFrameBytes), maxFrameBytes);
+            frames.set(key, stateFrame);
+          }
+          writeFrame(client, stateFrame, true);
+        }
       } catch {
         for (const client of clients) if (client.kind === "browser") client.socket.destroy();
       }
@@ -265,6 +300,15 @@ export function createTrajectoryServer(port: number, lockPath: string, options: 
     if (client.superseded) return;
     if (message.type === "publisher:detach" && client.kind === "publisher" && client.publisherId && publishers.get(client.publisherId)?.client === client) { clearPending(client, "Publisher is disconnected"); publishers.delete(client.publisherId); publishState(); scheduleIdleExit(); return; }
     if (message.type === "ui:attach") { client.kind = "browser"; emit(client, latest); return; }
+    if (message.type === "ui:focus" && client.kind === "browser") {
+      const publisherId = typeof message.publisherId === "string" ? message.publisherId : undefined;
+      const runId = typeof message.runId === "string" ? message.runId : undefined;
+      client.focusAware = true;
+      if (publisherId !== undefined && runId !== undefined) client.focus = { publisherId, runId };
+      else delete client.focus;
+      emit(client, focusedState(latest, client.focus));
+      return;
+    }
     if (client.kind === "publisher" && message.type === "publisher:attach" && typeof message.publisherId === "string") {
       cancelIdleExit();
       client.publisherId = message.publisherId;
