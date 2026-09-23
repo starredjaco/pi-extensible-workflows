@@ -898,7 +898,7 @@ void test("Trajectory subagent stats bar only exposes valid controls", () => {
   const helperStart = source.indexOf("    const subagentAccounting");
   const helperEnd = source.indexOf("    function renderAgent()", helperStart);
   assert.ok(helperStart >= 0 && helperEnd > helperStart);
-  const helpers = runInNewContext(`(() => { const esc = (value) => String(value ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;"); const json = (value) => JSON.stringify(value); const fmtClock = (value) => String(value); const fmtRuntime = (value) => String(value); const fmtCost = (value) => String(value); const fmtTokens = (value) => String(value); const accounting = (value) => value.accounting || { input: 0, output: 0, cost: 0 }; const stateClass = (value) => value === "running" ? "spin" : value === "completed" ? "ok" : "fail"; const glyph = (value) => value; ${source.slice(helperStart, helperEnd)}; return { renderAgentStats, subagentAgent }; })()`, { Date }) as {
+  const helpers = runInNewContext(`(() => { const esc = (value) => String(value ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;"); const json = (value) => JSON.stringify(value); const highlightCode = (value) => esc(value); const fmtClock = (value) => String(value); const fmtRuntime = (value) => String(value); const fmtCost = (value) => String(value); const fmtTokens = (value) => String(value); const accounting = (value) => value.accounting || { input: 0, output: 0, cost: 0 }; const stateClass = (value) => value === "running" ? "spin" : value === "completed" ? "ok" : "fail"; const glyph = (value) => value; ${source.slice(helperStart, helperEnd)}; return { renderAgentStats, subagentAgent }; })()`, { Date }) as {
     renderAgentStats: (found: Record<string, unknown>, agent: Record<string, unknown>, isSubagent: boolean) => string;
     subagentAgent: (subagent: Record<string, unknown>) => Record<string, unknown>;
   };
@@ -934,7 +934,7 @@ void test("Trajectory output inspector distinguishes states and safely renders v
   const helperStart = source.indexOf("    function subagentOutputFallback");
   const helperEnd = source.indexOf("    function renderSystemPane", helperStart);
   assert.ok(helperStart >= 0 && helperEnd > helperStart);
-  const helpers = runInNewContext(`(() => { const esc = (value) => String(value ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;"); const json = (value) => JSON.stringify(value); ${source.slice(helperStart, helperEnd)}; return { renderOutputPane, outputForInspector, subagentOutputFallback }; })()`) as {
+  const helpers = runInNewContext(`(() => { const esc = (value) => String(value ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;"); const json = (value) => JSON.stringify(value); const highlightCode = (value) => esc(value); ${source.slice(helperStart, helperEnd)}; return { renderOutputPane, outputForInspector, subagentOutputFallback }; })()`) as {
     renderOutputPane: (agent: Record<string, unknown>) => string;
     outputForInspector: (agent: Record<string, unknown>) => Record<string, unknown>;
     subagentOutputFallback: (agent: Record<string, unknown>) => Record<string, unknown>;
@@ -959,7 +959,7 @@ void test("Trajectory refreshes output in the selected agent tab", () => {
   const pane = { innerHTML: "" };
   const tabs = { querySelectorAll: () => [] };
   const state = { sysPane: "output" };
-  const helpers = runInNewContext(`(() => { const esc = (value) => String(value ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;"); const json = (value) => JSON.stringify(value); const $ = (id) => id === "sys-pane" ? pane : tabs; const patch = (root, html) => { root.innerHTML = html; }; const sessionResources = () => ({ skillFilters: [], skillResolved: [], extensionFilters: [], extensionResolved: [] }); const estTokens = () => 0; const sanitizeMarkdown = (value) => value; const marked = { parse: (value) => value }; const nameList = () => ""; const resourceList = () => ""; const selected = () => undefined; ${source.slice(helperStart, helperEnd)}; return { renderSystemPane }; })()`, { pane, tabs, state }) as { renderSystemPane: (agent: Record<string, unknown>) => void };
+  const helpers = runInNewContext(`(() => { const esc = (value) => String(value ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;"); const json = (value) => JSON.stringify(value); const highlightCode = (value) => esc(value); const $ = (id) => id === "sys-pane" ? pane : tabs; const patch = (root, html) => { root.innerHTML = html; }; const sessionResources = () => ({ skillFilters: [], skillResolved: [], extensionFilters: [], extensionResolved: [] }); const estTokens = () => 0; const sanitizeMarkdown = (value) => value; const marked = { parse: (value) => value }; const nameList = () => ""; const resourceList = () => ""; const selected = () => undefined; ${source.slice(helperStart, helperEnd)}; return { renderSystemPane }; })()`, { pane, tabs, state }) as { renderSystemPane: (agent: Record<string, unknown>) => void };
   const agent: Record<string, unknown> = { name: "agent", state: "running", tools: [], output: { status: "pending" } };
   helpers.renderSystemPane(agent);
   assert.match(pane.innerHTML, /not yet available/);
@@ -1032,6 +1032,7 @@ void test("Trajectory renders launch arguments safely and preserves JSON falsy v
   const helpers = runInNewContext(`(() => {
     const esc = (value) => String(value ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
     const json = (value) => JSON.stringify(value, null, 2);
+    const highlightCode = (value) => esc(value);
     ${source.slice(helperStart, helperEnd)}
     return { renderWorkflowArguments };
   })()`) as { renderWorkflowArguments: (record: { snapshot?: { args?: unknown }; snapshotArgsTruncated?: boolean }, open?: boolean, key?: string) => string };
@@ -1206,4 +1207,25 @@ void test("live state keeps the newest tool timings when an agent exceeds the ti
   // The live gantt must follow the agent, so the newest calls survive and stay ordered.
   assert.equal(retained.at(-1)?.data?.toolCallId, "call-001999");
   assert.deepEqual([...retained].map((value) => value.data?.toolCallId), [...retained].map((value) => value.data?.toolCallId).sort());
+});
+
+void test("Trajectory highlights code with Prism and keeps multi-line tokens coloured per numbered line", () => {
+  const source = readFileSync(new URL("../src/assets/index.html", import.meta.url), "utf8");
+  const prism = readFileSync(new URL("../src/assets/prism.min.js", import.meta.url), "utf8");
+  const helperStart = source.indexOf("    // Prism tokenises whole sources");
+  const helperEnd = source.indexOf("\n", source.indexOf("    const numbered = (source) =>")) + 1;
+  assert.ok(helperStart >= 0 && helperEnd > helperStart);
+  assert.match(source, /<script src="\.\/prism\.min\.js"><\/script>/);
+  const context: Record<string, unknown> = {};
+  context.window = context;
+  const helpers = runInNewContext(`${prism}; (() => { const esc = (value) => String(value ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;"); ${source.slice(helperStart, helperEnd)}; return { highlightCode, numbered }; })()`, context) as { highlightCode: (source: unknown, language: string) => string; numbered: (source: string) => string };
+  assert.match(helpers.highlightCode('{"agent": 1}', "json"), /<span class="token property">"agent"<\/span>/);
+  assert.doesNotMatch(helpers.highlightCode("const x = '<img src=x onerror=alert(1)>';", "javascript"), /<img/);
+  assert.equal(helpers.highlightCode("<b>", "cobol"), "&lt;b&gt;");
+  const lines = helpers.numbered("const prompt = `first\nsecond`;").split("</div>").filter(Boolean);
+  assert.equal(lines.length, 2);
+  for (const line of lines) {
+    assert.equal((line.match(/<span/g) ?? []).length, (line.match(/<\/span>/g) ?? []).length);
+    assert.match(line, /class="token template-string"/);
+  }
 });

@@ -485,6 +485,13 @@ export function createTrajectoryServer(port: number, lockPath: string, options: 
       }).catch(() => { writeJson(response, 500, { error: "Trajectory DOM diffing library is unavailable" }); });
       return;
     }
+    if (request.method === "GET" && path === "/prism.min.js") {
+      void readFile(new URL("./assets/prism.min.js", import.meta.url)).then((script) => {
+        response.writeHead(200, { "content-type": "application/javascript; charset=utf-8", "content-length": script.byteLength, "cache-control": "no-store" });
+        response.end(script);
+      }).catch(() => { writeJson(response, 500, { error: "Trajectory syntax highlighting library is unavailable" }); });
+      return;
+    }
     if (request.method === "GET" && (path === "/favicon.png" || path === "/favicon.ico")) {
       void readFile(new URL("./assets/favicon.png", import.meta.url)).then((icon) => {
         response.writeHead(200, { "content-type": "image/png", "content-length": icon.byteLength, "cache-control": "no-store" });
