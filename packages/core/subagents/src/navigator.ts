@@ -82,16 +82,23 @@ function entryName(entry: NavigatorEntry): string {
   const role = requestRole(entry.request);
   return boundedText(entry.request?.label?.trim() || (role === "none" ? shortId(entry.status.id) : role), 256);
 }
-/** Picker rows in the `/workflow` style; a repeated name carries its short ID so every row stays unique. */
-function pickerLabels(entries: readonly NavigatorEntry[]): string[] {
+/** Names for a list of runs; a repeated name carries its short ID, as in the `/workflow` picker, so every row stays unique. */
+function listNames(entries: readonly NavigatorEntry[]): string[] {
   const names = entries.map(entryName);
   return entries.map(({ status }, index) => {
     const name = names[index] ?? "";
-    const suffix = names.indexOf(name) === names.lastIndexOf(name) ? "" : ` ${shortId(status.id)}`;
+    return names.indexOf(name) === names.lastIndexOf(name) ? name : `${name} ${shortId(status.id)}`;
+  });
+}
+/** Picker rows in the `/workflow` style. */
+function pickerLabels(entries: readonly NavigatorEntry[]): string[] {
+  const names = listNames(entries);
+  return entries.map(({ status }, index) => {
+    const name = names[index] ?? "";
     const model = status.progress?.state?.model;
     const cost = formatCost(status.progress?.accounting.cost);
     const runtime = status.startedAt === undefined ? "" : ` runtime=${formatWorkflowRuntime((status.finishedAt ?? Date.now()) - status.startedAt)}`;
-    return `${runStateGlyph(status.state, "⠦")} ${name}${suffix}  ${status.state}${model ? `  ${boundedText(model.model, 256)}${model.thinking ? `:${model.thinking}` : ""}` : ""}${cost ? ` ${cost}` : ""}${runtime}`;
+    return `${runStateGlyph(status.state, "⠦")} ${name}  ${status.state}${model ? `  ${boundedText(model.model, 256)}${model.thinking ? `:${model.thinking}` : ""}` : ""}${cost ? ` ${cost}` : ""}${runtime}`;
   });
 }
 function boundedText(value: unknown, limit = MAX_DETAIL_TEXT): string {
@@ -147,7 +154,8 @@ function detailRows(inspection: Inspection, styles: WorkflowProgressStyles, menu
   ];
 }
 function listRows(entries: readonly NavigatorEntry[], selectedId: string, styles: WorkflowProgressStyles): string[] {
-  return [styles.bold("Runs"), ...entries.map((entry) => `${entry.status.id === selectedId ? "→" : " "} • ${entryName(entry)} · ${progressStyleForState(entry.status.state, styles)(runStateGlyph(entry.status.state, "⠦"))}`)];
+  const names = listNames(entries);
+  return [styles.bold("Runs"), ...entries.map((entry, index) => `${entry.status.id === selectedId ? "→" : " "} • ${names[index] ?? ""} · ${progressStyleForState(entry.status.state, styles)(runStateGlyph(entry.status.state, "⠦"))}`)];
 }
 function headerRows(entries: readonly NavigatorEntry[], styles: WorkflowProgressStyles): string[] {
   const counts = (["running", "failed", "stopped", "completed"] as const).flatMap((state) => {

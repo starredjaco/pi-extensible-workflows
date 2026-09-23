@@ -1075,6 +1075,49 @@ test("deletes a settled run and the settled runs of one state from the dashboard
   }
 });
 
+test("tells repeated names apart with the short ID in the dashboard list, as the /workflow picker does", async () => {
+  const cwd = await mkdtemp(join(tmpdir(), "subagents-navigator-twins-"));
+  const storageDir = join(cwd, "storage");
+  const statuses = [
+    { id: "aaaaaaaa-0001", label: "twin", finishedAt: 30 },
+    { id: "bbbbbbbb-0002", label: "twin", finishedAt: 20 },
+    { id: "cccccccc-0003", label: "solo", finishedAt: 10 },
+  ].map(({ id, label, finishedAt }) => ({ id, label, status: { id, sessionId: "session-1", state: "completed", startedAt: 1, finishedAt } }));
+  for (const { id, label } of statuses) {
+    await mkdir(join(storageDir, id), { recursive: true });
+    await writeFile(join(storageDir, id, "request.json"), JSON.stringify({ prompt: id, label, mode: "background" }));
+  }
+  const command = dashboardFixture(storageDir, {
+    async run() { throw new Error("unexpected run"); },
+    async inspect(params) { return params.id ? statuses.find(({ id }) => id === params.id)?.status : statuses.map(({ status }) => status); },
+    async steer() {},
+    async stop() {},
+    async retry() {},
+  });
+  let screen = "";
+  const context = {
+    ...(await executionContext(cwd)),
+    mode: "tui",
+    hasUI: true,
+    ui: {
+      async custom(factory) {
+        const { component, text } = openDashboard(factory);
+        screen = text();
+        component.dispose();
+      },
+      notify: strictNotify(),
+    },
+  };
+  try {
+    await command.options.handler("", context);
+    assert.match(screen, /→ • twin aaaaaaaa · ✓/);
+    assert.match(screen, / {2}• twin bbbbbbbb · ✓/);
+    assert.match(screen, / {2}• solo · ✓/);
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
+
 test("keeps the selected run in view after leaving the action menu", async () => {
   const cwd = await mkdtemp(join(tmpdir(), "subagents-navigator-selection-"));
   const storageDir = join(cwd, "storage");
