@@ -114,6 +114,8 @@ export interface SubagentManagerContext {
   readonly extensionContext: ExtensionContext;
   readonly waitForForeground?: boolean;
   readonly includeAttemptMetadata?: boolean;
+  /** Adds the live progress and activity of an active run; tool results leave streamed activity out. */
+  readonly includeActivity?: boolean;
 }
 export interface SubagentAttemptActionData {
   readonly attempt: AgentAttemptSummary;

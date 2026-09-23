@@ -1,5 +1,5 @@
 import { keyHint, truncateToVisualLines, type Theme } from "@earendil-works/pi-coding-agent";
-import { truncateToWidth } from "@earendil-works/pi-tui";
+import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { type AwaitingCheckpoint, type PersistedRun, type RunStore, type WorktreeReference } from "./persistence.js";
 import { budgetUsage } from "./budget.js";
 import { formatCost, formatTokens } from "./background-widget.js";
@@ -28,7 +28,7 @@ export interface WorkflowProgressStyles {
   dim(text: string): string;
   bold(text: string): string;
 }
-const PLAIN_WORKFLOW_PROGRESS_STYLES: WorkflowProgressStyles = { accent: (text) => text, success: (text) => text, error: (text) => text, warning: (text) => text, muted: (text) => text, dim: (text) => text, bold: (text) => text };
+export const PLAIN_WORKFLOW_PROGRESS_STYLES: WorkflowProgressStyles = { accent: (text) => text, success: (text) => text, error: (text) => text, warning: (text) => text, muted: (text) => text, dim: (text) => text, bold: (text) => text };
 type AgentGroup = { label: string; entries: readonly { agent: AgentRecord; index: number; depth: number }[] };
 function agentGroupKey(agent: AgentRecord): string { return JSON.stringify([agent.structuralPath ?? [], agent.parentBreadcrumb ?? null]); }
 function agentGroupLabel(agents: readonly AgentRecord[]): string {
@@ -60,7 +60,7 @@ function renderGroupedAgents(agents: readonly AgentRecord[], render: (entry: { a
 }
 const RUN_STATE_GLYPH: Record<string, string> = { "not started": "○", queued: "○", pausing: "⏸", paused: "⏸", completed: "✓", failed: "✗", stopped: "✗", interrupted: "↯", budget_exhausted: "!", awaiting_input: "?" };
 const AGENT_STATE_GLYPH: Record<string, string> = { queued: "○", waiting_for_child: "…", paused: "⏸", retrying: "↻", completed: "✓", failed: "✗", cancelled: "✗" };
-function runStateGlyph(state: string, running: string): string { return state === "running" ? running : RUN_STATE_GLYPH[state] ?? "◆"; }
+export function runStateGlyph(state: string, running: string): string { return state === "running" ? running : RUN_STATE_GLYPH[state] ?? "◆"; }
 function agentStateGlyph(state: string, running: string): string { return state === "running" ? running : AGENT_STATE_GLYPH[state] ?? "○"; }
 type ProgressStyleKey = "success" | "error" | "warning" | "accent" | "muted";
 const PROGRESS_STATE_STYLE: Record<string, ProgressStyleKey> = { completed: "success", failed: "error", cancelled: "error", running: "accent", paused: "warning", pausing: "warning", interrupted: "warning", retrying: "accent", budget_exhausted: "warning", awaiting_input: "warning" };
@@ -70,10 +70,10 @@ function styleForState(map: Record<string, ProgressStyleKey>, state: string, sty
   const key = map[state] ?? "muted";
   return (text) => styles[key](text);
 }
-function progressStyleForState(state: string, styles: WorkflowProgressStyles): (text: string) => string { return styleForState(PROGRESS_STATE_STYLE, state, styles); }
+export function progressStyleForState(state: string, styles: WorkflowProgressStyles): (text: string) => string { return styleForState(PROGRESS_STATE_STYLE, state, styles); }
 function workflowIconStyle(state: string, styles: WorkflowProgressStyles): (text: string) => string { return styleForState(WORKFLOW_ICON_STYLE, state, styles); }
 function phaseStyleForState(state: string, styles: WorkflowProgressStyles): (text: string) => string { return styleForState(PHASE_STATE_STYLE, state, styles); }
-function formatWorkflowRuntime(durationMs: number): string {
+export function formatWorkflowRuntime(durationMs: number): string {
   const seconds = Math.max(0, Math.floor(durationMs / 1000));
   if (seconds < 60) return `${String(seconds)}s`;
   const minutes = Math.floor(seconds / 60);
@@ -636,7 +636,7 @@ export interface AgentDetailPresentation {
   readonly accounting?: AgentAccounting;
   readonly error?: { readonly code: string; readonly message: string };
 }
-function formatAgentError(error: NonNullable<AgentDetailPresentation["error"]>, styles: WorkflowProgressStyles = PLAIN_WORKFLOW_PROGRESS_STYLES): string {
+export function formatAgentError(error: NonNullable<AgentDetailPresentation["error"]>, styles: WorkflowProgressStyles = PLAIN_WORKFLOW_PROGRESS_STYLES): string {
   return styles.error(`Error: ${error.code}: ${error.message}`);
 }
 
@@ -785,11 +785,7 @@ export function formatWorkflowPhaseDashboard(run: PersistedRun, snapshot: Readon
   const model = buildWorkflowPhaseModel(run, snapshot);
   const tree = buildWorkflowPhaseTree(model);
   const expanded = selection.expandedNodeIds === undefined ? workflowPhaseTreeInitialExpanded(tree) : new Set(selection.expandedNodeIds);
-  const wrap = (text: string, limit = safeWidth): string[] => truncateToVisualLines(text, Number.MAX_SAFE_INTEGER, Math.max(1, limit), 0).visualLines.map((line) => line.trimEnd());
-  // ponytail: ANSI-only width, good enough for the ASCII labels the tree renders
-  const ansiPattern = new RegExp(ANSI_SGR_SOURCE, "g");
-  const visibleLength = (text: string): number => text.replace(ansiPattern, "").length;
-  const padTo = (text: string, limit: number): string => `${text}${" ".repeat(Math.max(0, limit - visibleLength(text)))}`;
+  const wrap = (text: string): string[] => wrapNavigatorLine(text, safeWidth);
   const phaseStyle = (state: string): ((text: string) => string) => phaseStyleForState(state, styles);
   const phase = selection.phaseId ? model.phases.find((candidate) => candidate.id === selection.phaseId) : undefined;
   const selectedByAgent = selection.agentId ? tree.nodes.find((node) => node.kind === "agent" && node.agentId === selection.agentId && (!selection.phaseId || node.phaseId === selection.phaseId)) : undefined;
@@ -853,28 +849,34 @@ export function formatWorkflowPhaseDashboard(run: PersistedRun, snapshot: Readon
   const scopedShells = (run.activeShellsByPhase?.length ?? 0) > 0;
   const shellActivity = scopedShells ? undefined : formatShellActivity(run.activeShells, run.activeShellStartedAt, "⠦", styles, now);
   if (shellActivity) lines.push(`  ${shellActivity}`);
-  const renderTree = (limit: number): string[] => [styles.bold("Tree"), ...(visibleNodes.length ? visibleNodes.flatMap((node) => wrap(treeLine(node), limit)) : [styles.muted("(empty)")])];
   const actionRows = (): string[] => {
     const actions = selection.actions;
     if (!actions) return [];
     return ["", styles.bold(actions.title), ...actions.options.map((option, index) => `${index === actions.index ? "→ " : "  "}${index === actions.index ? styles.accent(option) : option}`)];
   };
-  const detailRows = (): string[] => [...details(selectedNode), ...actionRows()];
-  if (safeWidth >= 80) {
-    const sidebarWidth = Math.min(42, Math.max(24, Math.floor((safeWidth - 3) * 0.38)));
-    const detailWidth = Math.max(1, safeWidth - sidebarWidth - 3);
-    const sidebar = renderTree(sidebarWidth).flatMap((line) => wrap(line, sidebarWidth));
-    const detail = detailRows().flatMap((line) => wrap(line, detailWidth));
-    const rows = Math.max(sidebar.length, detail.length);
-    for (let index = 0; index < rows; index += 1) lines.push(`${padTo(sidebar[index] ?? "", sidebarWidth)} | ${detail[index] ?? ""}`);
-  } else if (selection.detailsOnly) {
-    lines.push(...detailRows().flatMap((line) => wrap(line)));
-  } else {
-    lines.push(...renderTree(safeWidth));
-    if (!selection.treeOnly) lines.push("", ...detailRows().flatMap((line) => wrap(line)));
-  }
+  const treeRows = [styles.bold("Tree"), ...(visibleNodes.length ? visibleNodes.map(treeLine) : [styles.muted("(empty)")])];
+  lines.push(...formatNavigatorColumns(treeRows, [...details(selectedNode), ...actionRows()], safeWidth, selection));
   if (model.unassignedAgents?.length && !tree.nodes.some((node) => node.phaseId === "unassigned")) lines.push(...wrap(styles.muted(`Unassigned agents: ${String(model.unassignedAgents.length)}`)));
   return lines.flatMap((line) => wrap(line));
+}
+function wrapNavigatorLine(text: string, width: number): string[] {
+  return truncateToVisualLines(text, Number.MAX_SAFE_INTEGER, Math.max(1, width), 0).visualLines.map((line) => line.trimEnd());
+}
+/** The navigator layout: a sidebar beside details at 80 columns or wider, otherwise one of them (or both stacked). */
+export function formatNavigatorColumns(sidebar: readonly string[], detail: readonly string[], width: number, layout: Readonly<{ treeOnly?: boolean | undefined; detailsOnly?: boolean | undefined }> = {}): string[] {
+  const safeWidth = Math.max(1, width);
+  if (safeWidth >= 80) {
+    const sidebarWidth = Math.min(42, Math.max(24, Math.floor((safeWidth - 3) * 0.38)));
+    const left = sidebar.flatMap((line) => wrapNavigatorLine(line, sidebarWidth));
+    const right = detail.flatMap((line) => wrapNavigatorLine(line, safeWidth - sidebarWidth - 3));
+    return Array.from({ length: Math.max(left.length, right.length) }, (_, index) => {
+      const cell = left[index] ?? "";
+      return `${cell}${" ".repeat(Math.max(0, sidebarWidth - visibleWidth(cell)))} | ${right[index] ?? ""}`;
+    });
+  }
+  if (layout.detailsOnly) return detail.flatMap((line) => wrapNavigatorLine(line, safeWidth));
+  const left = sidebar.flatMap((line) => wrapNavigatorLine(line, safeWidth));
+  return layout.treeOnly ? left : [...left, ...detail.flatMap((line) => wrapNavigatorLine(line, safeWidth))];
 }
 export function formatCheckpointReview(checkpoint: AwaitingCheckpoint): string {
   const context = JSON.stringify(checkpoint.context, null, 2);

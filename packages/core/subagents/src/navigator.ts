@@ -1,12 +1,11 @@
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
-import { copyToClipboard, getAgentDir, SettingsManager, type ExtensionAPI, type ExtensionCommandContext, type Theme } from "@earendil-works/pi-coding-agent";
+import { copyToClipboard, getAgentDir, SettingsManager, type ExtensionAPI, type ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import { Editor, truncateToWidth, type EditorTheme } from "@earendil-works/pi-tui";
-import { agentActionLabels, deepFreeze, errorText, formatAgentDetail, jsonValue, loadingRegistry, navigatorAttentionSortByState, openWorkflowArtifact, themeWorkflowProgressStyles, visibleStandaloneAgentAttemptActions, workflowPromptArtifact, workflowResultArtifact, type AgentAttemptSummary, type AgentDetailPresentation, type StandaloneAgentAttemptActionContext, type WorkflowArtifact } from "../../src/index.js";
+import { agentActionLabels, deepFreeze, errorText, formatAgentDetail, formatAgentError, formatCost, formatNavigatorColumns, formatWorkflowRuntime, jsonValue, loadingRegistry, navigatorAttentionSortByState, openWorkflowArtifact, PLAIN_WORKFLOW_PROGRESS_STYLES, progressStyleForState, runStateGlyph, themeWorkflowProgressStyles, visibleStandaloneAgentAttemptActions, workflowKeyLabel, workflowKeyMatches, workflowPromptArtifact, workflowResultArtifact, type AgentAttemptSummary, type AgentDetailPresentation, type StandaloneAgentAttemptActionContext, type WorkflowArtifact, type WorkflowProgressStyles } from "../../src/index.js";
 import { normalizeSubagentRunRequest, type SubagentManager, type SubagentManagerContext, type SubagentProgress, type SubagentRunRequest, type SubagentStatus } from "./contracts.js";
 import { attemptValue, statusValue } from "./decode.js";
 const MAX_DETAIL_TEXT = 4000;
-const MAX_DETAIL_TOOL_CALLS = 32;
 
 type NavigatorEntry = {
   readonly status: SubagentStatus;
@@ -27,8 +26,9 @@ function inspectionValue(value: unknown): { status: SubagentStatus; record: Reco
   return record && status ? { status, record } : undefined;
 }
 
+// Detail inspections only feed this UI, so they carry the live activity that tool results leave out.
 function managerContext(context: ExtensionCommandContext, waitForForeground = true, includeAttemptMetadata = false): SubagentManagerContext {
-  return { toolCallId: "subagents-command", signal: undefined, onUpdate: undefined, ...(waitForForeground ? {} : { waitForForeground: false }), ...(includeAttemptMetadata ? { includeAttemptMetadata: true } : {}), extensionContext: context };
+  return { toolCallId: "subagents-command", signal: undefined, onUpdate: undefined, ...(waitForForeground ? {} : { waitForForeground: false }), ...(includeAttemptMetadata ? { includeAttemptMetadata: true, includeActivity: true } : {}), extensionContext: context };
 }
 
 async function loadRequest(storageDirectory: string, id: string): Promise<{ request?: SubagentRunRequest; error?: string }> {
@@ -71,7 +71,6 @@ async function inspectEntry(manager: SubagentManager, storageDirectory: string, 
   };
 }
 
-function requestLabel(request: SubagentRunRequest | undefined): string { return request?.label?.trim() || "none"; }
 function requestRole(request: SubagentRunRequest | undefined): string {
   const role: unknown = request?.role;
   if (typeof role === "string" && role.trim()) return role.trim();
@@ -79,17 +78,28 @@ function requestRole(request: SubagentRunRequest | undefined): string {
   return typeof override?.name === "string" && override.name.trim() ? override.name.trim() : "none";
 }
 function shortId(id: string): string { return id.length > 12 ? id.slice(0, 8) : id; }
-function pickerLabel(entry: NavigatorEntry, index: number): string { return `${String(index + 1)}. label=${boundedText(requestLabel(entry.request), 256)} role=${boundedText(requestRole(entry.request), 256)} [${entry.status.state}] ${shortId(entry.status.id)}`; }
+function entryName(entry: NavigatorEntry): string {
+  const role = requestRole(entry.request);
+  return boundedText(entry.request?.label?.trim() || (role === "none" ? shortId(entry.status.id) : role), 256);
+}
+/** Picker rows in the `/workflow` style; a repeated name carries its short ID so every row stays unique. */
+function pickerLabels(entries: readonly NavigatorEntry[]): string[] {
+  const names = entries.map(entryName);
+  return entries.map(({ status }, index) => {
+    const name = names[index] ?? "";
+    const suffix = names.indexOf(name) === names.lastIndexOf(name) ? "" : ` ${shortId(status.id)}`;
+    const model = status.progress?.state?.model;
+    const cost = formatCost(status.progress?.accounting.cost);
+    const runtime = status.startedAt === undefined ? "" : ` runtime=${formatWorkflowRuntime((status.finishedAt ?? Date.now()) - status.startedAt)}`;
+    return `${runStateGlyph(status.state, "⠦")} ${name}${suffix}  ${status.state}${model ? `  ${boundedText(model.model, 256)}${model.thinking ? `:${model.thinking}` : ""}` : ""}${cost ? ` ${cost}` : ""}${runtime}`;
+  });
+}
 function boundedText(value: unknown, limit = MAX_DETAIL_TEXT): string {
-  const text = typeof value === "string" ? value : (() => { try { const serialized: unknown = JSON.stringify(value); return typeof serialized === "string" ? serialized : String(value); } catch { return String(value); } })();
+  const text = typeof value === "string" ? value : (() => { try { const serialized: unknown = JSON.stringify(value, null, 2); return typeof serialized === "string" ? serialized : String(value); } catch { return String(value); } })();
   return text.length > limit ? `${text.slice(0, limit)}…` : text;
 }
-function timestamp(value: unknown): string | undefined { return typeof value === "number" && Number.isFinite(value) ? new Date(value).toISOString() : undefined; }
-
-function appendValue(lines: string[], title: string, value: unknown): void {
-  lines.push(`${title}:`);
-  for (const line of boundedText(value).split("\n")) lines.push(`  ${line}`);
-}
+// sv-SE renders local time as YYYY-MM-DD HH:MM:SS.
+function localTime(value: number | undefined): string | undefined { return value !== undefined && Number.isFinite(value) ? new Date(value).toLocaleString("sv-SE") : undefined; }
 
 function latestAttempt(status: SubagentStatus): AgentAttemptSummary | undefined {
   return [...(status.attemptDetails ?? [])].sort((left, right) => right.attempt - left.attempt)[0];
@@ -123,29 +133,38 @@ function detailPresentation(inspection: Inspection): AgentDetailPresentation {
     ...(error === undefined ? {} : { error: { code: boundedText(error.code, 256), message: boundedText(error.message) } }),
   };
 }
-function detailLines(inspection: Inspection, theme?: Theme): string[] {
+/** Details of the selected run; `actions` sit between its fields and the long prompt and result sections. */
+function detailRows(inspection: Inspection, styles: WorkflowProgressStyles, actions: readonly string[] = []): string[] {
   const { entry, record } = inspection;
   const { status, request } = entry;
-  const styles = theme === undefined ? undefined : themeWorkflowProgressStyles(theme);
+  const presentation = detailPresentation(inspection);
+  const startedAt = localTime(status.startedAt);
+  const finishedAt = localTime(status.finishedAt);
   const lines = [
-    theme?.bold(theme.fg("accent", `Subagent ${boundedText(status.id, 256)}`)) ?? `Subagent ${boundedText(status.id, 256)}`,
-    `label=${boundedText(requestLabel(request), 256)} role=${boundedText(requestRole(request), 256)}`,
-    ...formatAgentDetail(detailPresentation(inspection), styles, status.finishedAt ?? Date.now()),
+    styles.bold(`Selected subagent: ${entryName(entry)}`),
+    `ID: ${boundedText(status.id, 256)}`,
+    ...formatAgentDetail(presentation, styles, status.finishedAt ?? Date.now(), { includeError: false }),
+    ...(startedAt === undefined ? [] : [`Started: ${startedAt}`]),
+    ...(finishedAt === undefined ? [] : [`Finished: ${finishedAt}`]),
+    ...(status.worktree === undefined ? [] : [`Worktree: ${boundedText(status.worktree.path)} (${boundedText(status.worktree.branch)})`]),
+    ...(entry.requestError === undefined ? [] : [styles.warning(`Request unavailable: ${boundedText(entry.requestError)}`)]),
+    ...(presentation.error === undefined ? [] : [formatAgentError(presentation.error, styles)]),
+    ...actions,
   ];
-  const startedAt = timestamp(status.startedAt);
-  const finishedAt = timestamp(status.finishedAt);
-  if (startedAt) lines.push(`startedAt=${startedAt}`);
-  if (finishedAt) lines.push(`finishedAt=${finishedAt}`);
-  if (request?.prompt) appendValue(lines, "prompt", request.prompt);
-  if (entry.requestError) lines.push(`request=unavailable: ${boundedText(entry.requestError)}`);
-  if (status.worktree) lines.push(`worktree=${boundedText(status.worktree.path)} branch=${boundedText(status.worktree.branch)}`);
-  const toolCalls = status.progress?.toolCalls;
-  if (toolCalls?.length) {
-    lines.push(`toolCalls=${String(toolCalls.length)}`);
-    for (const call of toolCalls.slice(-MAX_DETAIL_TOOL_CALLS)) lines.push(`  ${boundedText(call.name, 256)} [${call.state}]`);
-  }
-  if (Object.prototype.hasOwnProperty.call(record, "value")) appendValue(lines, "value", record.value);
+  if (request?.prompt) lines.push(styles.bold("Prompt"), boundedText(request.prompt));
+  if (Object.prototype.hasOwnProperty.call(record, "value")) lines.push(styles.bold("Result"), boundedText(record.value));
   return lines;
+}
+function listRows(entries: readonly NavigatorEntry[], selectedId: string, styles: WorkflowProgressStyles): string[] {
+  return [styles.bold("Runs"), ...entries.map((entry) => `${entry.status.id === selectedId ? "→" : " "} • ${entryName(entry)} · ${progressStyleForState(entry.status.state, styles)(runStateGlyph(entry.status.state, "⠦"))}`)];
+}
+function headerRows(entries: readonly NavigatorEntry[], styles: WorkflowProgressStyles): string[] {
+  const counts = (["running", "failed", "stopped", "completed"] as const).flatMap((state) => {
+    const count = entries.filter((entry) => entry.status.state === state).length;
+    return count ? [`${String(count)} ${state}`] : [];
+  });
+  const cost = formatCost(entries.reduce((sum, entry) => sum + (entry.status.progress?.accounting.cost ?? 0), 0));
+  return [styles.bold(styles.accent("Subagents")), [...counts, ...(cost ? [cost] : [])].join(" · ")];
 }
 
 function tuiRows(tui: { terminal?: { rows?: number } }): number { return typeof tui.terminal?.rows === "number" && Number.isFinite(tui.terminal.rows) ? tui.terminal.rows : 24; }
@@ -156,7 +175,9 @@ function unrefTimer(timer: ReturnType<typeof setInterval>): void {
 }
 
 type NavigatorTui = Parameters<typeof openWorkflowArtifact>[0];
-type DetailResult = { readonly kind: "steer"; readonly message: string } | "retry" | undefined;
+type DashboardResult = { readonly entry: NavigatorEntry; readonly message: string } | undefined;
+// Pi keeps its footer below a custom component; the dashboard leaves room for it as /workflow does.
+const DASHBOARD_FOOTER_ROWS = 2;
 function standaloneActionContext(manager: SubagentManager, inspection: Inspection, context: ExtensionCommandContext): StandaloneAgentAttemptActionContext | undefined {
   const status = inspection.entry.status;
   const request = inspection.entry.request;
@@ -218,7 +239,7 @@ async function steerSubagent(manager: SubagentManager, storageDirectory: string,
   await manager.steer({ id: entry.status.id, message }, managerContext(context));
   context.ui.notify(`Steered subagent ${entry.status.id}.`, "info");
 }
-async function performAction(manager: SubagentManager, storageDirectory: string, entry: NavigatorEntry, action: string, context: ExtensionCommandContext, tui: NavigatorTui | undefined, clipboard: (value: string) => Promise<void>): Promise<"stay" | "retry"> {
+async function performAction(manager: SubagentManager, storageDirectory: string, entry: NavigatorEntry, action: string, context: ExtensionCommandContext, tui: NavigatorTui | undefined, clipboard: (value: string) => Promise<void>): Promise<"stay" | { readonly retryId: string }> {
   const fresh = await inspectEntry(manager, storageDirectory, entry, context);
   const available = actionOptions(manager, fresh, context);
   if (!available.includes(action)) throw new Error(`Action ${action} is no longer available`);
@@ -254,31 +275,36 @@ async function performAction(manager: SubagentManager, storageDirectory: string,
     const result = retryResult(await manager.retry({ id: entry.status.id }, managerContext(context, false)));
     if (!result) throw new Error("Retry returned an invalid subagent result");
     context.ui.notify(`Retried subagent ${entry.status.id} as ${result.id}.`, "info");
-    return "retry";
+    return { retryId: result.id };
   }
   return "stay";
 }
-async function showDetail(manager: SubagentManager, storageDirectory: string, entry: NavigatorEntry, context: ExtensionCommandContext, clipboard: (value: string) => Promise<void>): Promise<"exit" | undefined> {
+async function showDetail(manager: SubagentManager, storageDirectory: string, entry: NavigatorEntry, context: ExtensionCommandContext, clipboard: (value: string) => Promise<void>): Promise<void> {
   let inspection = await inspectEntry(manager, storageDirectory, entry, context);
-  if (context.mode !== "tui") {
-    for (;;) {
-      const action = await context.ui.select(detailLines(inspection).join("\n"), actionOptions(manager, inspection, context));
-      if (!action || action === "Back") return;
-      try {
-        if (await performAction(manager, storageDirectory, entry, action, context, undefined, clipboard) === "retry") return;
-        inspection = await inspectEntry(manager, storageDirectory, entry, context);
-      } catch (error) {
-        context.ui.notify(`Cannot ${action.toLowerCase()}: ${errorText(error)}`, "warning");
-      }
+  for (;;) {
+    const action = await context.ui.select(detailRows(inspection, PLAIN_WORKFLOW_PROGRESS_STYLES).join("\n"), actionOptions(manager, inspection, context));
+    if (!action || action === "Back") return;
+    try {
+      if (await performAction(manager, storageDirectory, entry, action, context, undefined, clipboard) !== "stay") return;
+      inspection = await inspectEntry(manager, storageDirectory, entry, context);
+    } catch (error) {
+      context.ui.notify(`Cannot ${action.toLowerCase()}: ${errorText(error)}`, "warning");
     }
   }
-  const result = await context.ui.custom<DetailResult>((tui, theme, keybindings, done) => {
-    let offset = 0;
-    let actionMode = false;
-    let actionIndex = 0;
-    let actionRunning = false;
-    let disposed = false;
-    let steerMode = false;
+}
+
+/** The `/workflow` dashboard layout for standalone runs: the run list beside the selected run's details. */
+async function showDashboard(manager: SubagentManager, storageDirectory: string, initial: readonly NavigatorEntry[], context: ExtensionCommandContext, clipboard: (value: string) => Promise<void>): Promise<void> {
+  const first = initial[0];
+  if (first === undefined) return;
+  let initialInspection: Inspection;
+  try { initialInspection = await inspectEntry(manager, storageDirectory, first, context); }
+  catch (error) {
+    context.ui.notify(`Cannot inspect subagent ${first.status.id}: ${errorText(error)}`, "warning");
+    initialInspection = { entry: first, record: {} };
+  }
+  const result = await context.ui.custom<DashboardResult>((tui, theme, keybindings, done) => {
+    const styles = themeWorkflowProgressStyles(theme);
     const editorTheme: EditorTheme = {
       borderColor: (text) => theme.fg("accent", text),
       selectList: {
@@ -290,160 +316,213 @@ async function showDetail(manager: SubagentManager, storageDirectory: string, en
       },
     };
     const steerEditor = new Editor(tui, editorTheme);
-    let refreshTimer: ReturnType<typeof setInterval> | undefined;
+    let entries = initial;
+    let inspection = initialInspection;
+    let offset = 0;
+    let detailsMode = false;
+    let actionMode = false;
+    let actionIndex = 0;
+    let steerMode = false;
+    let actionRunning = false;
     let refreshing = false;
-    let refreshGeneration = 0;
-    const requestRender = (): void => {
-      if (!disposed) tui.requestRender();
-    };
-    const stopRefresh = (): void => {
-      if (refreshTimer !== undefined) {
-        clearInterval(refreshTimer);
-        refreshTimer = undefined;
-      }
-      refreshGeneration += 1;
-    };
-    const buildActionRows = (detail: readonly string[], options: readonly string[]): string[] => [
-      ...detail,
-      "",
-      theme.bold("Agent actions"),
-      ...options.map((option, index) => `${index === actionIndex ? "→ " : "  "}${index === actionIndex ? theme.fg("accent", option) : option}`),
-    ];
-    const viewportRows = (): number => Math.max(1, tuiRows(tui) - 1);
-    const maxOffsetFor = (rows: readonly string[]): number => Math.max(0, rows.length - viewportRows());
-    const clampOffset = (rows: readonly string[]): void => {
-      offset = Math.max(0, Math.min(maxOffsetFor(rows), offset));
-    };
-    const actionView = (): { readonly detail: string[]; readonly options: string[]; readonly rows: string[] } => {
-      const detail = detailLines(inspection, theme);
-      const options = actionOptions(manager, inspection, context);
-      return { detail, options, rows: buildActionRows(detail, options) };
-    };
-    const scrollActionIntoView = (view = actionView()): void => {
-      const { options, rows } = view;
-      if (actionIndex >= options.length) { clampOffset(rows); return; }
-      const viewport = viewportRows();
-      const actionRow = rows.length - options.length + actionIndex;
-      if (actionRow < offset) offset = actionRow;
-      else if (actionRow >= offset + viewport) offset = actionRow - viewport + 1;
-      clampOffset(rows);
-    };
-    const reportRefreshError = (error: unknown): void => {
+    let disposed = false;
+    let generation = 0;
+    let renderedWidth = 80;
+    let selectionNeedsScroll = true;
+    let timer: ReturnType<typeof setInterval> | undefined;
+    const keyLabel = (binding: string, fallback: string): string => workflowKeyLabel(keybindings, binding, fallback);
+    const matches = (data: string, binding: string): boolean => workflowKeyMatches(keybindings, data, binding);
+    const requestRender = (): void => { if (!disposed) tui.requestRender(); };
+    const options = (): string[] => actionOptions(manager, inspection, context);
+    const warn = (message: string): void => {
       if (disposed) return;
-      try { context.ui.notify(`Cannot refresh subagent ${entry.status.id}: ${errorText(error)}`, "warning"); } catch { /* The session UI may already be closing. */ }
+      try { context.ui.notify(message, "warning"); } catch { /* The session UI may already be closing. */ }
     };
-    const refreshInspection = async (): Promise<void> => {
-      if (disposed || actionRunning || refreshing || inspection.entry.status.state !== "running") return;
+    const stopTimer = (): void => {
+      if (timer === undefined) return;
+      clearInterval(timer);
+      timer = undefined;
+    };
+    // Refresh while anything runs; a settled list has nothing left to change.
+    const syncTimer = (): void => {
+      if (!entries.some((entry) => entry.status.state === "running") && inspection.entry.status.state !== "running") stopTimer();
+      else if (timer === undefined && !disposed) {
+        timer = setInterval(() => { if (timer !== undefined) void refresh(); }, 1000);
+        unrefTimer(timer);
+      }
+    };
+    const apply = (nextEntries: readonly NavigatorEntry[], next: Inspection): void => {
+      const selectedAction = actionMode ? options()[actionIndex] : undefined;
+      const position = (list: readonly NavigatorEntry[]): number => list.findIndex((entry) => entry.status.id === next.entry.status.id);
+      if (position(entries) !== position(nextEntries)) selectionNeedsScroll = true;
+      entries = nextEntries;
+      inspection = next;
+      if (selectedAction !== undefined) {
+        const nextOptions = options();
+        const kept = nextOptions.indexOf(selectedAction);
+        actionIndex = kept >= 0 ? kept : Math.min(actionIndex, Math.max(0, nextOptions.length - 1));
+      }
+      syncTimer();
+      requestRender();
+    };
+    const reload = async (id = inspection.entry.status.id): Promise<void> => {
+      const current = ++generation;
+      const nextEntries = await loadEntries(manager, storageDirectory, context);
+      const selected = nextEntries.find((entry) => entry.status.id === id) ?? nextEntries[0];
+      if (selected === undefined) return;
+      const next = await inspectEntry(manager, storageDirectory, selected, context);
+      if (current === generation) apply(nextEntries, next);
+    };
+    // A tick re-reads only the active runs and the selection; the full list is read on open and after an action.
+    const refresh = async (): Promise<void> => {
+      if (disposed || actionRunning || refreshing) return;
       refreshing = true;
-      const generation = ++refreshGeneration;
-      const actionIndexBeforeRefresh = actionIndex;
-      const viewBeforeRefresh = actionMode ? actionView() : undefined;
-      const actionRowBeforeRefresh = viewBeforeRefresh === undefined ? -1 : viewBeforeRefresh.rows.length - viewBeforeRefresh.options.length + actionIndex;
-      const wasVisible = actionRowBeforeRefresh >= offset && actionRowBeforeRefresh < offset + viewportRows();
       try {
-        const next = await inspectEntry(manager, storageDirectory, entry, context);
-        if (generation !== refreshGeneration) return;
-        inspection = next;
-        if (inspection.entry.status.state !== "running") stopRefresh();
-        if (actionMode) {
-          const options = actionOptions(manager, inspection, context);
-          actionIndex = Math.min(actionIndex, Math.max(0, options.length - 1));
-          const view = actionView();
-          if (wasVisible || actionIndex !== actionIndexBeforeRefresh) scrollActionIntoView(view);
-          else clampOffset(view.rows);
-        }
-        requestRender();
+        const current = ++generation;
+        const selectedId = inspection.entry.status.id;
+        const stale = entries.filter((entry) => entry.status.state === "running" || entry.status.id === selectedId);
+        const fresh = new Map((await Promise.all(stale.map((entry) => inspectEntry(manager, storageDirectory, entry, context)))).map((next) => [next.entry.status.id, next]));
+        const next = fresh.get(selectedId);
+        if (current === generation && next !== undefined) apply(attentionSort(entries.map((entry) => fresh.get(entry.status.id)?.entry ?? entry)), next);
       } catch (error: unknown) {
-        if (generation === refreshGeneration) reportRefreshError(error);
+        warn(`Cannot refresh subagents: ${errorText(error)}`);
       } finally {
         refreshing = false;
       }
     };
-    const close = (value: DetailResult): void => {
-      if (disposed) return;
+    const select = (delta: number): void => {
+      const index = Math.max(0, entries.findIndex((entry) => entry.status.id === inspection.entry.status.id));
+      const entry = entries[(index + delta + entries.length) % entries.length];
+      if (entry === undefined || entry.status.id === inspection.entry.status.id) return;
+      // The list row already holds the state; the full inspection adds the result and attempt details.
+      inspection = { entry, record: {} };
+      selectionNeedsScroll = true;
+      const current = ++generation;
+      void inspectEntry(manager, storageDirectory, entry, context).then((next) => {
+        if (current === generation) apply(entries, next);
+      }, (error: unknown) => { if (current === generation) warn(`Cannot inspect subagent ${entry.status.id}: ${errorText(error)}`); });
+    };
+    // Reads still in flight check the generation, so closing invalidates them.
+    const shutDown = (): void => {
       disposed = true;
-      stopRefresh();
+      generation += 1;
+      stopTimer();
+    };
+    const close = (value: DashboardResult): void => {
+      if (disposed) return;
+      shutDown();
       done(value);
     };
     steerEditor.onSubmit = (value) => {
       const message = value.trim();
-      if (message) close({ kind: "steer", message });
-    };
-    const isDisposed = (): boolean => disposed;
-    const renderLines = (width: number): string[] => {
-      if (disposed) return [];
-      const renderWidth = Math.max(1, width);
-      const action = actionMode ? actionView() : undefined;
-      const detail = (action?.detail ?? detailLines(inspection, theme)).map((line) => truncateToWidth(line, renderWidth, "…"));
-      const rows = steerMode ? [...detail, "", theme.bold("Steer subagent"), ...steerEditor.render(renderWidth)] : action?.rows ?? detail;
-      const viewport = viewportRows();
-      const maxOffset = maxOffsetFor(rows);
-      const visibleOffset = steerMode ? maxOffset : Math.max(0, Math.min(maxOffset, offset));
-      const hint = theme.fg("dim", steerMode ? "enter submit · esc back" : actionMode ? "↑/↓ actions · enter run · esc back" : "↑/↓ scroll · a actions · enter actions · esc back");
-      return [...rows.slice(visibleOffset, visibleOffset + viewport), hint].map((line) => truncateToWidth(line, renderWidth, "…"));
+      if (message) close({ entry: inspection.entry, message });
     };
     const runAction = (action: string): void => {
-      if (disposed) return;
       actionRunning = true;
       requestRender();
-      void performAction(manager, storageDirectory, entry, action, context, tui, clipboard).then(async (outcome) => {
+      void performAction(manager, storageDirectory, inspection.entry, action, context, tui, clipboard).then(async (outcome) => {
         if (disposed) return;
-        if (outcome === "retry") { close("retry"); return; }
-        const next = await inspectEntry(manager, storageDirectory, entry, context);
-        if (isDisposed()) return;
-        inspection = next;
-        if (inspection.entry.status.state !== "running") stopRefresh();
+        // The action already happened: a failed reload must not read as a failed action that invites a second retry.
+        try { await reload(outcome === "stay" ? undefined : outcome.retryId); }
+        catch (error: unknown) { warn(`Cannot refresh subagents: ${errorText(error)}`); }
         actionMode = false;
         actionIndex = 0;
         offset = 0;
-      }).catch((error: unknown) => {
-        if (!disposed) context.ui.notify(`Cannot ${action.toLowerCase()}: ${errorText(error)}`, "warning");
-      }).finally(() => {
+        selectionNeedsScroll = true;
+      }, (error: unknown) => { warn(`Cannot ${action.toLowerCase()}: ${errorText(error)}`); }).finally(() => {
         actionRunning = false;
-        if (!disposed) requestRender();
+        requestRender();
       });
     };
-    if (inspection.entry.status.state === "running") {
-      refreshTimer = setInterval(() => { void refreshInspection().catch(reportRefreshError); }, 1000);
-      unrefTimer(refreshTimer);
-    }
+    syncTimer();
     return {
-      render: renderLines,
+      render(width: number): string[] {
+        if (disposed) return [];
+        renderedWidth = width;
+        const narrow = width < 80;
+        const actions = actionMode ? options() : [];
+        const actionRows = actionMode ? [styles.bold("Agent actions"), ...actions.map((option, index) => index === actionIndex ? `→ ${styles.accent(option)}` : `  ${option}`)] : steerMode ? [] : [styles.muted("enter agent actions")];
+        const layout = narrow ? detailsMode || actionMode || steerMode ? { detailsOnly: true } : { treeOnly: true } : {};
+        const content = [...headerRows(entries, styles), ...formatNavigatorColumns(listRows(entries, inspection.entry.status.id, styles), detailRows(inspection, styles, actionRows), width, layout)];
+        const footer = steerMode ? [styles.bold("Steer subagent"), ...steerEditor.render(width)] : [];
+        const rows = Math.max(1, tuiRows(tui) - DASHBOARD_FOOTER_ROWS);
+        const hintRows = rows >= 3 ? 1 : 0;
+        const viewport = Math.max(1, rows - hintRows - footer.length);
+        const keepVisible = (row: number): void => {
+          if (row < 0) return;
+          if (row < offset) offset = row;
+          else if (row >= offset + viewport) offset = row - viewport + 1;
+        };
+        // The selected action is the first arrow in the details column: it precedes the prompt and result.
+        if (actionMode) keepVisible(content.findIndex((line) => narrow ? line.startsWith("→ ") : line.includes(" | → ")));
+        else if (selectionNeedsScroll && !(narrow && detailsMode)) {
+          keepVisible(content.findIndex((line) => line.startsWith("→")));
+          selectionNeedsScroll = false;
+        }
+        offset = Math.max(0, Math.min(Math.max(0, content.length - viewport), offset));
+        const up = keyLabel("tui.select.up", "↑");
+        const down = keyLabel("tui.select.down", "↓");
+        const enter = keyLabel("tui.select.confirm", "enter");
+        const esc = keyLabel("tui.select.cancel", "esc");
+        const scroll = content.length > viewport ? ` · ${keyLabel("tui.select.pageUp", "pgup")}/${keyLabel("tui.select.pageDown", "pgdn")} scroll` : "";
+        const refreshHint = timer === undefined ? "" : " · auto-refresh 1s";
+        const back = narrow && detailsMode ? "details" : "list";
+        const hint = steerMode ? "enter submit · esc back"
+          : actionMode ? `${up}/${down} actions · ${enter} run · ${keyLabel("tui.editor.cursorLeft", "←")} ${back} · ${esc} ${back}`
+            : narrow && detailsMode ? `${up}/${down} scroll · ${enter} actions · a actions · ${esc} list${scroll}${refreshHint}`
+              : `${up}/${down} select · ${enter} ${narrow ? "details" : "actions"} · a actions · ${esc} close${scroll}${refreshHint}`;
+        return [...content.slice(offset, offset + viewport), ...footer, ...(hintRows ? [styles.dim(hint)] : [])].map((line) => truncateToWidth(line, Math.max(1, width), "…"));
+      },
       invalidate() {},
       handleInput(data: string) {
         if (disposed || actionRunning) return;
         if (steerMode) {
-          if (keybindings.matches(data, "tui.select.cancel")) { steerMode = false; actionMode = true; steerEditor.setText(""); offset = 0; scrollActionIntoView(); }
+          if (keybindings.matches(data, "tui.select.cancel")) { steerMode = false; actionMode = true; steerEditor.setText(""); }
           else steerEditor.handleInput(data);
           requestRender();
           return;
         }
-        if (!actionMode && data === "a") { actionMode = true; actionIndex = 0; offset = 0; scrollActionIntoView(); requestRender(); return; }
-        if (keybindings.matches(data, "tui.select.cancel")) {
-          if (actionMode) { actionMode = false; actionIndex = 0; offset = 0; requestRender(); } else close(undefined);
-          return;
+        const narrow = renderedWidth < 80;
+        const page = Math.max(1, tuiRows(tui) - DASHBOARD_FOOTER_ROWS - 1);
+        if (matches(data, "tui.select.pageUp")) offset = Math.max(0, offset - page);
+        else if (matches(data, "tui.select.pageDown")) offset += page;
+        else if (actionMode) {
+          const actions = options();
+          if (matches(data, "tui.select.cancel") || matches(data, "tui.editor.cursorLeft")) { actionMode = false; offset = 0; selectionNeedsScroll = true; }
+          else if (matches(data, "tui.select.up")) actionIndex = (actionIndex + actions.length - 1) % actions.length;
+          else if (matches(data, "tui.select.down")) actionIndex = (actionIndex + 1) % actions.length;
+          else if (matches(data, "tui.select.confirm")) {
+            const action = actions[actionIndex];
+            if (action === "Steer") { steerMode = true; actionMode = false; steerEditor.setText(""); }
+            else if (action && action !== "Back") runAction(action);
+            else { actionMode = false; offset = 0; selectionNeedsScroll = true; }
+          }
+        } else if (data === "a" || data === "A") { actionMode = true; actionIndex = 0; offset = 0; }
+        else if (matches(data, "tui.select.cancel")) {
+          if (!narrow || !detailsMode) { close(undefined); return; }
+          detailsMode = false;
+          offset = 0;
+          selectionNeedsScroll = true;
+        } else if (narrow && detailsMode) {
+          if (matches(data, "tui.select.up")) offset = Math.max(0, offset - 1);
+          else if (matches(data, "tui.select.down")) offset += 1;
+          else if (matches(data, "tui.select.confirm")) { actionMode = true; actionIndex = 0; offset = 0; }
+        } else if (matches(data, "tui.select.up")) select(-1);
+        else if (matches(data, "tui.select.down")) select(1);
+        else if (matches(data, "tui.select.confirm")) {
+          if (narrow) detailsMode = true;
+          else actionMode = true;
+          actionIndex = 0;
+          offset = 0;
         }
-        if (!actionMode) {
-          if (keybindings.matches(data, "tui.select.confirm")) { actionMode = true; actionIndex = 0; offset = 0; scrollActionIntoView(); requestRender(); }
-          else if (keybindings.matches(data, "tui.select.up")) { offset = Math.max(0, offset - 1); clampOffset(detailLines(inspection, theme)); requestRender(); }
-          else if (keybindings.matches(data, "tui.select.down")) { offset += 1; clampOffset(detailLines(inspection, theme)); requestRender(); }
-          return;
-        }
-        const options = actionOptions(manager, inspection, context);
-        if (keybindings.matches(data, "tui.select.up")) { actionIndex = (actionIndex + options.length - 1) % options.length; scrollActionIntoView(); }
-        else if (keybindings.matches(data, "tui.select.down")) { actionIndex = (actionIndex + 1) % options.length; scrollActionIntoView(); }
-        else if (keybindings.matches(data, "tui.select.confirm")) { const action = options[actionIndex]; if (action === "Steer") { steerMode = true; actionMode = false; steerEditor.setText(""); offset = 0; } else if (action && action !== "Back") runAction(action); else actionMode = false; }
-        else if (keybindings.matches(data, "tui.select.pageUp")) { offset = Math.max(0, offset - viewportRows()); clampOffset(actionView().rows); }
-        else if (keybindings.matches(data, "tui.select.pageDown")) { offset += viewportRows(); clampOffset(actionView().rows); }
         requestRender();
       },
-      dispose() { if (!disposed) { disposed = true; stopRefresh(); } },
+      dispose() { shutDown(); },
     };
   });
-  if (!result || result === "retry") return;
-  try { await steerSubagent(manager, storageDirectory, entry, context, result.message); }
+  if (result === undefined) return;
+  try { await steerSubagent(manager, storageDirectory, result.entry, context, result.message); }
   catch (error) { context.ui.notify(`Cannot steer: ${errorText(error)}`, "warning"); }
-  return "exit";
 }
 
 async function runNavigator(manager: SubagentManager, storageDirectory: string, args: string, context: ExtensionCommandContext, clipboard: (value: string) => Promise<void>): Promise<void> {
@@ -457,17 +536,21 @@ async function runNavigator(manager: SubagentManager, storageDirectory: string, 
       context.ui.notify("No durable subagent runs in this session.", "info");
       return;
     }
+    const labels = pickerLabels(entries);
     if (!context.hasUI) {
-      context.ui.notify(entries.map((entry, index) => pickerLabel(entry, index)).join("\n"), "info");
+      context.ui.notify(labels.join("\n"), "info");
       return;
     }
-    const labels = entries.map(pickerLabel);
+    if (context.mode === "tui") {
+      await showDashboard(manager, storageDirectory, entries, context, clipboard);
+      return;
+    }
     const choice = await context.ui.select("Subagents\n", [...labels, "Close"]);
     if (!choice || choice === "Close") return;
     const selected = entries[labels.indexOf(choice)];
     if (!selected) return;
     try {
-      if (await showDetail(manager, storageDirectory, selected, context, clipboard) === "exit") return;
+      await showDetail(manager, storageDirectory, selected, context, clipboard);
     } catch (error) {
       context.ui.notify(`Cannot inspect subagent ${selected.status.id}: ${errorText(error)}`, "warning");
     }

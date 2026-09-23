@@ -290,7 +290,7 @@ test("pins live background subagents below the editor until they settle", async 
   }
 });
 
-test("opens the /subagents picker and inspects durable status without an agent call", async () => {
+test("opens the /subagents dashboard and picker and inspects durable status without an agent call", async () => {
   const cwd = await mkdtemp(join(tmpdir(), "subagents-command-"));
   const storageDir = join(cwd, "subagents-storage");
   const firstId = "run-1";
@@ -326,7 +326,7 @@ test("opens the /subagents picker and inspects durable status without an agent c
   const commands = [];
   const pickerOptions = [];
   const detailScreens = [];
-  let pickerCount = 0;
+  const dashboards = [];
   const theme = { fg: (_color, text) => text, bold: (text) => text };
   const pi = {
     registerTool() {},
@@ -337,18 +337,30 @@ test("opens the /subagents picker and inspects durable status without an agent c
   assert.ok(command);
   const context = {
     ...(await executionContext(cwd)),
-    mode: "tui",
+    mode: "rpc",
     hasUI: true,
     ui: {
       select(title, options) {
-        assert.match(title, /Subagents/);
+        if (!title.startsWith("Subagents")) { detailScreens.push(title); return Promise.resolve("Back"); }
         pickerOptions.push([...options]);
-        pickerCount += 1;
-        return Promise.resolve(pickerCount === 1 ? options[2] : "Close");
+        return Promise.resolve(pickerOptions.length === 1 ? options[2] : "Close");
       },
+      notify() {},
+    },
+  };
+  const tuiContext = {
+    ...context,
+    mode: "tui",
+    ui: {
+      select() { throw new Error("the TUI dashboard replaces the picker"); },
       async custom(factory) {
-        const component = factory({ terminal: { rows: 20 }, requestRender() {} }, theme, { matches(data, binding) { return data === "escape" && binding === "tui.select.cancel"; } }, () => undefined);
-        detailScreens.push(component.render(120).join("\n"));
+        const component = factory({ terminal: { rows: 30 }, requestRender() {} }, theme, { matches(data, binding) { return data === binding || data === "escape" && binding === "tui.select.cancel"; } }, () => undefined);
+        dashboards.push(component.render(120).join("\n"));
+        component.handleInput("tui.select.down");
+        component.handleInput("j");
+        await waitFor(() => component.render(120).join("\n").includes("Result"));
+        dashboards.push(component.render(120).join("\n"));
+        component.dispose();
       },
       notify() {},
     },
@@ -361,16 +373,27 @@ test("opens the /subagents picker and inspects durable status without an agent c
     assert.equal(inspectCalls.every(({ context: callContext }) => callContext.extensionContext === context), true);
     assert.equal(inspectCalls[0].context.includeAttemptMetadata, undefined);
     assert.equal(inspectCalls[1].context.includeAttemptMetadata, true);
-    assert.match(pickerOptions[0][0], /label=reviewer.*\[running\].*run-1/);
-    assert.match(pickerOptions[0][1], /label=newest.*\[completed\].*run-3/);
-    assert.match(pickerOptions[0][2], /label=none.*\[completed\].*run-2/);
+    assert.equal(inspectCalls[1].context.includeActivity, true);
+    assert.equal(inspectCalls[0].context.includeActivity, undefined);
+    assert.match(pickerOptions[0][0], /^\S+ reviewer {2}running/);
+    assert.match(pickerOptions[0][1], /^✓ newest {2}completed runtime=0s$/);
+    assert.match(pickerOptions[0][2], /^✓ run-2 {2}completed runtime=0s$/);
     assert.doesNotMatch(pickerOptions[0].join("\n"), /run-other/);
     assert.doesNotMatch(pickerOptions[0].join("\n"), /run-malformed/);
-    assert.match(pickerOptions[0].join("\n"), /label=reviewer.*role=critic/);
-    assert.match(pickerOptions[0].join("\n"), /label=none.*role=none/);
-    assert.match(detailScreens[0], /label=none/);
-    assert.match(detailScreens[0], /role=none/);
-    assert.match(detailScreens[0], /done/);
+    assert.match(detailScreens[0], /Selected subagent: run-2/);
+    assert.match(detailScreens[0], /Role: \(none\)/);
+    assert.match(detailScreens[0], /Result\ndone/);
+
+    await command.options.handler("", tuiContext);
+    const [initial, selected] = dashboards;
+    assert.match(initial, /Runs +\| Selected subagent: reviewer/);
+    assert.match(initial, /→ • reviewer/);
+    assert.ok(initial.indexOf("reviewer ·") < initial.indexOf("newest ·") && initial.indexOf("newest ·") < initial.indexOf("run-2 ·"), initial);
+    assert.match(initial, /Role: critic/);
+    assert.doesNotMatch(initial, /run-other|run-malformed/);
+    assert.match(selected, /→ • run-2/);
+    assert.match(selected, /Selected subagent: run-2/);
+    assert.match(selected, /\| done/);
   } finally {
     await rm(cwd, { recursive: true, force: true });
   }
@@ -422,7 +445,7 @@ test("emits terminal status before cleanup and a cleaned status after worktree c
   }
 });
 
-test("refreshes an open running subagent detail without overlap and stops at terminal state", async () => {
+test("refreshes an open running subagent dashboard without overlap and stops once everything settles", async () => {
   const originalSetInterval = globalThis.setInterval;
   const originalClearInterval = globalThis.clearInterval;
   const timerCallbacks = [];
@@ -441,10 +464,11 @@ test("refreshes an open running subagent detail without overlap and stops at ter
   await mkdir(join(storageDir, id), { recursive: true });
   await writeFile(join(storageDir, id, "request.json"), JSON.stringify({ prompt: "refresh", label: "refresh", mode: "background" }));
   const running = { id, sessionId: "session-1", state: "running", startedAt: 1, progress: { accounting: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0 }, toolCalls: [], activity: { kind: "tool", text: "before" } } };
+  let listCalls = 0;
   const manager = {
     async run() { throw new Error("unexpected run"); },
     async inspect(params) {
-      if (!params.id) return [running];
+      if (!params.id) { listCalls += 1; return [running]; }
       detailCalls += 1;
       if (detailCalls === 1) return running;
       if (detailCalls === 2) return refresh.promise;
@@ -458,14 +482,12 @@ test("refreshes an open running subagent detail without overlap and stops at ter
   registerSubagentsExtension({ registerTool() {}, registerCommand(name, options) { commands.push({ name, options }); } }, { manager, managerDependencies: { storageDir } });
   const command = commands.find(({ name }) => name === "subagents");
   assert.ok(command);
-  let pickerCount = 0;
   const flush = async () => { for (let index = 0; index < 8; index += 1) await new Promise((resolve) => setImmediate(resolve)); };
   const context = {
     ...(await executionContext(cwd)),
     mode: "tui",
     hasUI: true,
     ui: {
-      async select(_title, options) { pickerCount += 1; return pickerCount === 1 ? options[0] : "Close"; },
       async custom(factory) {
         let finish;
         const completed = new Promise((resolve) => { finish = resolve; });
@@ -473,14 +495,18 @@ test("refreshes an open running subagent detail without overlap and stops at ter
         const component = factory({ terminal: { rows: 20 }, requestRender() { renders += 1; } }, { fg: (_color, text) => text, bold: (text) => text }, { matches(data, binding) { return data === binding || data === "escape" && binding === "tui.select.cancel"; } }, (value) => finish(value));
         assert.equal(timerCallbacks.length, 1);
         assert.match(component.render(120).join("\n"), /before/);
+        assert.match(component.render(120).join("\n"), /auto-refresh 1s/);
         timerCallbacks[0]();
         timerCallbacks[0]();
-        assert.equal(detailCalls, 2);
-        refresh.resolve({ ...running, state: "completed", finishedAt: 2, progress: { ...running.progress, activity: { kind: "text", text: "done" } } });
+        await waitFor(() => detailCalls === 2);
         await flush();
         assert.equal(detailCalls, 2);
-        assert.match(component.render(120).join("\n"), /done/);
+        refresh.resolve({ ...running, state: "completed", finishedAt: 2, progress: { ...running.progress, activity: { kind: "text", text: "done" } } });
+        await waitFor(() => component.render(120).join("\n").includes("done"));
+        assert.equal(detailCalls, 2);
+        assert.equal(listCalls, 1, "a tick re-reads the active runs, not the whole list");
         assert.equal(clearedTimers.length, 1);
+        assert.doesNotMatch(component.render(120).join("\n"), /auto-refresh/);
         const rendersAtTerminal = renders;
         timerCallbacks[0]();
         await flush();
@@ -533,14 +559,12 @@ test("ignores an in-flight detail refresh after the panel closes", async () => {
   registerSubagentsExtension({ registerTool() {}, registerCommand(name, options) { commands.push({ name, options }); } }, { manager, managerDependencies: { storageDir } });
   const command = commands.find(({ name }) => name === "subagents");
   assert.ok(command);
-  let pickerCount = 0;
   const flush = async () => { for (let index = 0; index < 8; index += 1) await new Promise((resolve) => setImmediate(resolve)); };
   const context = {
     ...(await executionContext(cwd)),
     mode: "tui",
     hasUI: true,
     ui: {
-      async select(_title, options) { pickerCount += 1; return pickerCount === 1 ? options[0] : "Close"; },
       async custom(factory) {
         let finish;
         const completed = new Promise((resolve) => { finish = resolve; });
@@ -626,13 +650,11 @@ test("matches workflow agent detail fields and runs standalone registered and co
   const command = commands.find(({ name }) => name === "subagents");
   assert.ok(command);
   const theme = { fg: (_color, text) => text, bold: (text) => text };
-  let pickerCount = 0;
   const context = {
     ...(await executionContext(cwd)),
     mode: "tui",
     hasUI: true,
     ui: {
-      async select(_title, options) { pickerCount += 1; return pickerCount === 1 ? options[0] : "Close"; },
       async custom(factory) {
         let component;
         let finish;
@@ -683,7 +705,7 @@ test("matches workflow agent detail fields and runs standalone registered and co
     await rm(cwd, { recursive: true, force: true });
   }
 });
-test("captures steering text inside the detail panel without nesting UI prompts", async () => {
+test("captures steering text inside the dashboard without nesting UI prompts", async () => {
   const cwd = await mkdtemp(join(tmpdir(), "subagents-navigator-steer-focus-"));
   const storageDir = join(cwd, "storage");
   const id = "run-steer-focus";
@@ -702,14 +724,12 @@ test("captures steering text inside the detail panel without nesting UI prompts"
   registerSubagentsExtension({ registerTool() {}, registerCommand(name, options) { commands.push({ name, options }); } }, { manager, managerDependencies: { storageDir } });
   const command = commands.find(({ name }) => name === "subagents");
   assert.ok(command);
-  let pickerCount = 0;
   let customCount = 0;
   const context = {
     ...(await executionContext(cwd)),
     mode: "tui",
     hasUI: true,
     ui: {
-      async select(_title, options) { pickerCount += 1; return pickerCount === 1 ? options[0] : "Close"; },
       async custom(factory) {
         customCount += 1;
         let finish;
@@ -739,13 +759,109 @@ test("captures steering text inside the detail panel without nesting UI prompts"
     await command.options.handler("", context);
     assert.deepEqual(steers, ["continue inside the panel"]);
     assert.equal(customCount, 1);
-    assert.equal(pickerCount, 1);
   } finally {
     await rm(cwd, { recursive: true, force: true });
   }
 });
 
-test("bounds every narrow detail-panel row while preserving scrolling and action selection", async () => {
+test("reports a failed reload after a dashboard action without blaming the action", async () => {
+  const cwd = await mkdtemp(join(tmpdir(), "subagents-navigator-reload-failure-"));
+  const storageDir = join(cwd, "storage");
+  const id = "run-reload-failure";
+  await mkdir(join(storageDir, id), { recursive: true });
+  await writeFile(join(storageDir, id, "request.json"), JSON.stringify({ prompt: "stop me", label: "stop-me", mode: "background" }));
+  let stops = 0;
+  const notices = [];
+  const status = { id, sessionId: "session-1", state: "running", startedAt: 1 };
+  const manager = {
+    async run() { throw new Error("unexpected run"); },
+    async inspect(params) {
+      if (params.id) return { ...status, state: stops ? "stopped" : "running" };
+      if (stops) throw new Error("list unavailable");
+      return [status];
+    },
+    async steer() {},
+    async stop() { stops += 1; return { ...status, state: "stopped" }; },
+    async retry() {},
+  };
+  const commands = [];
+  registerSubagentsExtension({ registerTool() {}, registerCommand(name, options) { commands.push({ name, options }); } }, { manager, managerDependencies: { storageDir } });
+  const command = commands.find(({ name }) => name === "subagents");
+  assert.ok(command);
+  const context = {
+    ...(await executionContext(cwd)),
+    mode: "tui",
+    hasUI: true,
+    ui: {
+      async custom(factory) {
+        let finish;
+        const completed = new Promise((resolve) => { finish = resolve; });
+        const component = factory({ terminal: { rows: 30 }, requestRender() {} }, { fg: (_color, text) => text, bold: (text) => text }, { matches(data, binding) { return data === binding || data === "escape" && binding === "tui.select.cancel"; } }, (value) => finish(value));
+        component.handleInput("a");
+        for (let index = 0; index < 10 && !component.render(140).join("\n").includes("→ Stop"); index += 1) component.handleInput("tui.select.down");
+        component.handleInput("tui.select.confirm");
+        await waitFor(() => !component.render(140).join("\n").includes("Agent actions"));
+        component.handleInput("escape");
+        return completed;
+      },
+      notify(message) { notices.push(message); },
+    },
+  };
+  try {
+    await command.options.handler("", context);
+    assert.equal(stops, 1);
+    assert.match(notices.join("\n"), /Stopped subagent/);
+    assert.match(notices.join("\n"), /Cannot refresh subagents: list unavailable/);
+    assert.doesNotMatch(notices.join("\n"), /Cannot stop/);
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
+
+test("keeps the selected run in view after leaving the action menu", async () => {
+  const cwd = await mkdtemp(join(tmpdir(), "subagents-navigator-selection-"));
+  const storageDir = join(cwd, "storage");
+  const statuses = Array.from({ length: 12 }, (_, index) => ({ id: `run-${String(index).padStart(2, "0")}`, sessionId: "session-1", state: "completed", startedAt: 1, finishedAt: 100 - index }));
+  for (const status of statuses) {
+    await mkdir(join(storageDir, status.id), { recursive: true });
+    await writeFile(join(storageDir, status.id, "request.json"), JSON.stringify({ prompt: status.id, label: `label-${status.id}`, mode: "background" }));
+  }
+  const manager = {
+    async run() { throw new Error("unexpected run"); },
+    async inspect(params) { return params.id ? statuses.find((status) => status.id === params.id) : statuses; },
+    async steer() {},
+    async stop() {},
+    async retry() {},
+  };
+  const commands = [];
+  registerSubagentsExtension({ registerTool() {}, registerCommand(name, options) { commands.push({ name, options }); } }, { manager, managerDependencies: { storageDir } });
+  const command = commands.find(({ name }) => name === "subagents");
+  assert.ok(command);
+  const context = {
+    ...(await executionContext(cwd)),
+    mode: "tui",
+    hasUI: true,
+    ui: {
+      async custom(factory) {
+        const component = factory({ terminal: { rows: 10 }, requestRender() {} }, { fg: (_color, text) => text, bold: (text) => text }, { matches(data, binding) { return data === binding || data === "escape" && binding === "tui.select.cancel"; } }, () => undefined);
+        component.handleInput("tui.select.up");
+        assert.match(component.render(120).join("\n"), /→ • label-run-11/, "moving to the last run scrolls it into view");
+        component.handleInput("a");
+        component.handleInput("escape");
+        assert.match(component.render(120).join("\n"), /→ • label-run-11/, "leaving the action menu scrolls back to the selection");
+        component.dispose();
+      },
+      notify(message) { throw new Error(message); },
+    },
+  };
+  try {
+    await command.options.handler("", context);
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
+
+test("bounds every narrow dashboard row while drilling from the list to details, actions, and steering", async () => {
   const cwd = await mkdtemp(join(tmpdir(), "subagents-navigator-narrow-"));
   const storageDir = join(cwd, "storage");
   const id = "run-narrow";
@@ -770,13 +886,11 @@ test("bounds every narrow detail-panel row while preserving scrolling and action
   const command = commands.find(({ name }) => name === "subagents");
   assert.ok(command);
   const width = 12;
-  let pickerCount = 0;
   const context = {
     ...(await executionContext(cwd)),
     mode: "tui",
     hasUI: true,
     ui: {
-      async select(_title, options) { pickerCount += 1; return pickerCount === 1 ? options[0] : "Close"; },
       async custom(factory) {
         let closed = false;
         let renders = 0;
@@ -791,49 +905,34 @@ test("bounds every narrow detail-panel row while preserving scrolling and action
           assert.equal(renders, rendersBefore + 1);
         };
         const assertNarrowRows = (rows) => assert.ok(rows.every((row) => visibleWidth(row) <= width), rows.join("\n"));
-        assertNarrowRows(component.render(width));
+        const list = component.render(width);
+        assertNarrowRows(list);
+        assert.equal(list.some((row) => row.includes("→ • narrow")), true);
+        component.handleInput("tui.select.confirm");
         for (let index = 0; index < 60; index += 1) component.handleInput("tui.select.down");
         const detailBottom = component.render(width);
+        assertNarrowRows(detailBottom);
         assert.equal(detailBottom.some((row) => row.includes("detail-39")), true);
         for (let index = 0; index < 3; index += 1) component.handleInput("tui.select.up");
         assert.notDeepEqual(component.render(width), detailBottom);
-        component.handleInput("tui.select.down");
-        assertNarrowRows(component.render(width));
         component.handleInput("a");
         const actionScreen = component.render(width);
-        assert.equal(actionScreen.some((row) => row.includes("Agent")), true);
-        assert.equal(actionScreen.some((row) => row.includes("→ Open")), true);
+        assertNarrowRows(actionScreen);
+        assert.equal(actionScreen.some((row) => row.startsWith("→ Open")), true);
         await refreshWithToolCalls(6);
-        assert.equal(component.render(width).some((row) => row.includes("→ Open")), true);
-        component.handleInput("tui.select.pageUp");
-        const detailScreen = component.render(width);
-        assertNarrowRows(detailScreen);
-        assert.equal(detailScreen.some((row) => row.includes("Agent")), false);
-        await refreshWithToolCalls(7); // grows detail by one row: enough to move the action row, not enough to push "Agent actions" past the next pageDown
-        assert.equal(component.render(width).some((row) => row.includes("Agent")), false);
-        component.handleInput("tui.select.pageDown");
-        const actionAfterPageDown = component.render(width);
-        assert.equal(actionAfterPageDown.some((row) => row.includes("Agent")), true);
-        assertNarrowRows(component.render(width));
-        let sawActionSection = actionAfterPageDown.some((row) => row.includes("Agent"));
-        let sawActionRow = false;
-        for (let index = 0; index < 4; index += 1) {
-          component.handleInput("tui.select.pageDown");
-          const frame = component.render(width);
-          assertNarrowRows(frame);
-          sawActionSection ||= frame.some((row) => row.includes("Agent"));
-          sawActionRow ||= frame.some((row) => row.includes("Steer"));
-        }
-        assert.equal(sawActionSection, true);
-        assert.equal(sawActionRow, true);
-        tui.terminal.rows = 30;
-        for (let index = 0; index < 10 && !component.render(80).join("\n").includes("→ Steer"); index += 1) component.handleInput("tui.select.down");
-        assert.match(component.render(80).join("\n"), /→ Steer/);
+        const refreshed = component.render(width);
+        assertNarrowRows(refreshed);
+        assert.equal(refreshed.some((row) => row.startsWith("→ Open")), true);
+        for (let index = 0; index < 10 && !component.render(width).join("\n").includes("→ Steer"); index += 1) component.handleInput("tui.select.down");
+        assert.match(component.render(width).join("\n"), /→ Steer/);
         component.handleInput("tui.select.confirm");
-        assertNarrowRows(component.render(width));
-        assert.match(component.render(width).join("\n"), /Steer/);
+        const steer = component.render(width);
+        assertNarrowRows(steer);
+        assert.match(steer.join("\n"), /Steer/);
         component.handleInput("escape");
         component.handleInput("escape");
+        component.handleInput("escape");
+        assert.equal(closed, false, "escape steps back from steering, actions, and details before closing");
         component.handleInput("escape");
         assert.equal(closed, true);
         return undefined;
@@ -843,7 +942,6 @@ test("bounds every narrow detail-panel row while preserving scrolling and action
   };
   try {
     await command.options.handler("", context);
-    assert.equal(pickerCount, 2);
   } finally {
     globalThis.setInterval = originalSetInterval;
     globalThis.clearInterval = originalClearInterval;
@@ -975,13 +1073,11 @@ test("opens bounded prompt and result artifacts while terminal runs hide system 
   registerSubagentsExtension({ registerTool() {}, registerCommand(name, options) { commands.push({ name, options }); } }, { manager, managerDependencies: { storageDir } });
   const command = commands.find(({ name }) => name === "subagents");
   assert.ok(command);
-  let pickerCount = 0;
   const context = {
     ...(await executionContext(cwd)),
     mode: "tui",
     hasUI: true,
     ui: {
-      async select(_title, options) { pickerCount += 1; return pickerCount === 1 ? options[0] : "Close"; },
       async custom(factory) {
         let finish;
         const completed = new Promise((resolve) => { finish = resolve; });
@@ -1005,12 +1101,11 @@ test("opens bounded prompt and result artifacts while terminal runs hide system 
         component.handleInput("escape");
         return completed;
       },
-      notify() {},
+      notify(message) { throw new Error(message); },
     },
   };
   try {
     await command.options.handler("", context);
-    assert.equal(pickerCount, 2);
   } finally {
     for (const [name, value] of Object.entries(previous)) {
       if (value === undefined) Reflect.deleteProperty(process.env, name);
@@ -1808,6 +1903,7 @@ test("persists progress under one snapshot without duplicate accounting fields",
     const run = await manager.run({ prompt: "progress" }, context);
     const status = await (async () => { await waitFor(async () => Boolean((await manager.inspect({ id: run.id }, context)).progress)); return manager.inspect({ id: run.id }, context); })();
     assert.deepEqual(status.progress, { accounting, toolCalls, lastEventAt: 123 });
+    assert.equal((await manager.inspect({ id: run.id }, { ...context, includeActivity: true })).progress?.activity?.text, "P1_SUBAGENT_STREAM_SECRET ", "the /subagents dashboard opts into the live activity");
     assert.ok(updates.some(({ progress }) => progress?.activity?.text === "P1_SUBAGENT_STREAM_SECRET "));
     assert.equal(JSON.stringify(status).includes("P1_SUBAGENT_STREAM_SECRET"), false);
     assert.equal(JSON.stringify(updates).includes(String.fromCharCode(27)), false);

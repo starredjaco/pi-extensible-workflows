@@ -115,8 +115,9 @@ function keybindingKeys(keybindings: unknown, name: string): readonly string[] |
 }
 type WorkflowKeybindings = { matches(data: string, binding: string): boolean };
 const WORKFLOW_VIM_KEYS: Readonly<Record<string, string>> = { "tui.select.up": "k", "tui.select.down": "j", "tui.editor.cursorLeft": "h", "tui.editor.cursorRight": "l" };
-function workflowKeyMatches(keybindings: WorkflowKeybindings, data: string, binding: string): boolean { return keybindings.matches(data, binding) || WORKFLOW_VIM_KEYS[binding] === data; }
-function workflowKeyLabel(keybindings: unknown, binding: string, fallback: string, labels: Readonly<Record<string, string>>): string {
+export function workflowKeyMatches(keybindings: WorkflowKeybindings, data: string, binding: string): boolean { return keybindings.matches(data, binding) || WORKFLOW_VIM_KEYS[binding] === data; }
+const WORKFLOW_KEY_LABELS: Readonly<Record<string, string>> = { up: "↑", down: "↓", left: "←", right: "→", pageUp: "pgup", pageDown: "pgdn" };
+export function workflowKeyLabel(keybindings: unknown, binding: string, fallback: string, labels: Readonly<Record<string, string>> = WORKFLOW_KEY_LABELS): string {
   const keys = keybindingKeys(keybindings, binding);
   const configured = keys?.length ? keys.map((key) => labels[key] ?? key) : [fallback];
   const vim = WORKFLOW_VIM_KEYS[binding];
@@ -554,8 +555,7 @@ export function registerWorkflowNavigator(deps: WorkflowNavigatorDependencies): 
                   let selectedNodeId = tree.nodes[0]?.id;
                   let expandedNodeIds = new Set(workflowPhaseTreeInitialExpanded(tree));
                   const terminalRows = () => Math.max(1, tuiRows(tui) - WORKFLOW_PANEL_FOOTER_ROWS);
-                  const keyLabels: Record<string, string> = { up: "↑", down: "↓", left: "←", right: "→", pageUp: "pgup", pageDown: "pgdn" };
-                  const keyLabel = (binding: string, fallback: string) => workflowKeyLabel(keybindings, binding, fallback, keyLabels);
+                  const keyLabel = (binding: string, fallback: string) => workflowKeyLabel(keybindings, binding, fallback);
                   const progressNow = () => {
                     const now = Date.now();
                     if (hardTerminalRunStates.has(view.run.state)) {
@@ -816,8 +816,7 @@ export function registerWorkflowNavigator(deps: WorkflowNavigatorDependencies): 
                     const currentLayout = layout();
                     const maxOffset = Math.max(0, renderedLines.length - currentLayout.contentViewport);
                     offset = Math.min(offset, maxOffset);
-                    const keyLabels: Record<string, string> = { up: "↑", down: "↓", left: "←", right: "→", pageUp: "pgup", pageDown: "pgdn" };
-                    const keyLabel = (binding: string, fallback: string) => workflowKeyLabel(keybindings, binding, fallback, keyLabels);
+                    const keyLabel = (binding: string, fallback: string) => workflowKeyLabel(keybindings, binding, fallback);
                     const hint = truncateToVisualLines(theme.fg("dim", `${keyLabel("tui.select.up", "↑")}/${keyLabel("tui.select.down", "↓")}/pgup/pgdn scroll · enter select · esc cancel`), Number.MAX_SAFE_INTEGER, width, 1).visualLines[0] ?? "";
                     const controls = currentLayout.compactControls
                       ? [options.map((option, index) => `${index === selectedIndex ? "[" : " "}${option}${index === selectedIndex ? "]" : " "}`).join(" ")]

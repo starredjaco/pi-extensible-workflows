@@ -1102,8 +1102,9 @@ class PersistentSubagentManager implements SubagentManager {
     if (request.id !== undefined) {
       const id = checkedId({ id: request.id });
       const active = this.activeRuns.get(id);
-      const status = active ? persistedStatus(active) : this.terminalSummaries.get(id) ?? await loadPersistedStatus(storageDirectory(this.dependencies), id);
-      const inspection = publicStatus(status, context.includeAttemptMetadata === true);
+      const includeActivity = context.includeActivity === true;
+      const status = active ? includeActivity ? liveStatus(active) : persistedStatus(active) : this.terminalSummaries.get(id) ?? await loadPersistedStatus(storageDirectory(this.dependencies), id);
+      const inspection = publicStatus(status, context.includeAttemptMetadata === true, includeActivity);
       if (status.state === "completed") return { ...inspection, value: await loadPersistedResult(storageDirectory(this.dependencies), id) };
       if (status.state === "failed") {
         const failure = status.error ?? await loadPersistedFailure(storageDirectory(this.dependencies), id);
