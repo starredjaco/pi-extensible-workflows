@@ -266,3 +266,51 @@ void test("Trajectory live gantt keeps cached timing, merges dense calls, and pa
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+void test("Trajectory keeps a subagent transcript when a refresh races a newer revision", { skip: !browserPath, timeout: 120_000 }, async () => {
+  const probe = createServer();
+  await new Promise<void>((resolve, reject) => { probe.once("error", reject); probe.listen(0, "127.0.0.1", resolve); });
+  const address = probe.address();
+  assert.ok(address && typeof address !== "string");
+  const port = address.port;
+  await new Promise<void>((resolve) => { probe.close(() => { resolve(); }); });
+  const root = mkdtempSync(join(tmpdir(), "pi-extensible-workflows-trajectory-stale-"));
+  const server = createTrajectoryServer(port, join(root, "lock.json"));
+  await new Promise<void>((resolve, reject) => { server.once("error", reject); server.listen(port, "127.0.0.1", resolve); });
+  const publisherId = "stalepublisher1";
+  const subagentId = "11111111-1111-4111-8111-111111111111";
+  const call = (index: number) => [
+    { type: "message", timestamp: new Date(1_000 + index).toISOString(), message: { role: "assistant", content: [{ type: "toolCall", id: `call-${String(index)}`, name: "read", arguments: { path: `f${String(index)}` } }] } },
+    { type: "message", timestamp: new Date(1_001 + index).toISOString(), message: { role: "toolResult", toolCallId: `call-${String(index)}`, toolName: "read", content: [{ type: "text", text: "ok" }], isError: false } },
+  ];
+  let revision = 1;
+  const publisher = new WebSocket(`ws://127.0.0.1:${String(port)}/ws`);
+  await new Promise((resolve) => { publisher.addEventListener("open", resolve, { once: true }); });
+  publisher.send(JSON.stringify({ type: "publisher:attach", publisherId }));
+  const publish = () => { publisher.send(JSON.stringify({ type: "publisher:state", publisher: { id: publisherId, title: "stale", cwd: "/project", sessionId: "session", connected: true }, runs: [], subagents: [{ id: subagentId, label: "live-sub", state: "running", role: "scout", startedAt: 1_000, model: { provider: "fixture", model: "model" }, request: { prompt: "go", model: "fixture/model" }, attempts: 1, transcript: { revision, status: "available", timing: [] } }] })); };
+  // Revision 2 is answered as stale, as a publisher does when the session file grew between its state poll and the read.
+  publisher.addEventListener("message", (event) => {
+    const message = JSON.parse(String(event.data)) as { type?: string; requestId?: string; revision?: number };
+    if (message.type !== "publisher:transcript") return;
+    const base = { type: "publisher:transcript-result", requestId: message.requestId, publisherId, subagentId, requestedRevision: message.revision };
+    if (message.revision === 2) { publisher.send(JSON.stringify({ ...base, ok: false, status: "available", revision: 3, error: "Transcript revision is stale" })); return; }
+    const calls = message.revision === 3 ? 3 : 2;
+    publisher.send(JSON.stringify({ ...base, ok: true, status: "available", revision: message.revision, entries: [{ type: "message", timestamp: new Date(1_000).toISOString(), message: { role: "user", content: "go" } }, ...Array.from({ length: calls }, (_, index) => call(index)).flat()] }));
+  });
+  publish();
+  const toolRows = "[...document.querySelectorAll('#events .evt .pill')].filter((pill) => pill.textContent === 'TOOL').length";
+  try {
+    await withChrome(`http://127.0.0.1:${String(port)}/?view=subagent&subagent=${publisherId}:${subagentId}`, async (page) => {
+      await waitFor(page, `${toolRows} === 2`);
+      revision = 2; publish();
+      await delay(500);
+      assert.equal(Number(await page.evaluate(toolRows)), 2, "a stale refresh keeps the cached tool calls");
+      revision = 3; publish();
+      await waitFor(page, `${toolRows} === 3`);
+    });
+  } finally {
+    publisher.close();
+    await new Promise<void>((resolve) => { server.close(() => { resolve(); }); });
+    rmSync(root, { recursive: true, force: true });
+  }
+});
