@@ -45,12 +45,18 @@ function publisherId(cwd: string, sessionId: string): string { return createHash
 function trajectoryPort(value: unknown): number { return positiveInteger(value) && value <= 65535 ? value : DEFAULT_TRAJECTORY_PORT; }
 function delay(ms: number): Promise<void> { return new Promise((resolve) => setTimeout(resolve, ms)); }
 
-async function serverHealthy(port: number): Promise<boolean> {
+type ServerHealth = { pid?: number; fingerprint?: string; startedAt?: number };
+// Servers older than the identity fields answer `{ ok: true }` alone, so every field is optional.
+async function serverHealth(port: number): Promise<ServerHealth | undefined> {
   try {
     const response = await fetch(`http://127.0.0.1:${String(port)}/health`, { signal: AbortSignal.timeout(300) });
-    return response.ok;
-  } catch { return false; }
+    if (!response.ok) return undefined;
+    const body: unknown = await response.json().catch(() => undefined);
+    if (!object(body)) return {};
+    return { ...(positiveInteger(body.pid) ? { pid: body.pid } : {}), ...(typeof body.fingerprint === "string" ? { fingerprint: body.fingerprint } : {}), ...(positiveInteger(body.startedAt) ? { startedAt: body.startedAt } : {}) };
+  } catch { return undefined; }
 }
+async function serverHealthy(port: number): Promise<boolean> { return await serverHealth(port) !== undefined; }
 
 function signalProcess(pid: number, signal: NodeJS.Signals): void {
   try {
@@ -88,23 +94,28 @@ async function readLock(path: string): Promise<TrajectoryLock | undefined> {
   }
 }
 
-async function waitForServer(port: number): Promise<void> {
+// Only a server reporting this fingerprint counts: an older one still bound to the port would otherwise be adopted forever.
+async function waitForServer(port: number, fingerprint: string): Promise<void> {
+  let foreign = false;
   for (let attempt = 0; attempt < 60; attempt += 1) {
-    if (await serverHealthy(port)) return;
+    const health = await serverHealth(port);
+    if (health?.fingerprint === fingerprint) return;
+    foreign = health !== undefined;
     await delay(50);
   }
-  throw new Error(`Trajectory server did not start on port ${String(port)}`);
+  throw new Error(foreign ? `Trajectory port ${String(port)} is held by another Trajectory server; stop it and retry` : `Trajectory server did not start on port ${String(port)}`);
 }
 async function resolveExistingServer(lockPath: string, existing: TrajectoryLock, fingerprint: string): Promise<TrajectoryLock | undefined> {
-  if (await serverHealthy(existing.port)) {
-    if (existing.fingerprint === fingerprint) return existing;
+  const health = await serverHealth(existing.port);
+  if (health) {
+    if (existing.fingerprint === fingerprint && health.fingerprint === fingerprint) return existing;
     await stopStaleServer(existing);
     await rm(lockPath, { force: true });
     return undefined;
   }
   if (await processAlive(existing.pid, existing.startedAt)) {
     try {
-      await waitForServer(existing.port);
+      await waitForServer(existing.port, fingerprint);
       return existing;
     } catch {
       // A live lock can still name the attaching process during startup; after the bounded wait, replace the unrecoverable startup owner and retry normally.
@@ -145,12 +156,15 @@ async function ensureTrajectoryServer(agentDir: string, configuredPort: number):
       throw error;
     }
   } finally { await lockHandle?.close(); }
+  // A server can answer on the port without owning the lock, e.g. one whose lock was lost; it reports its pid, so replace it before spawning.
+  const occupant = await serverHealth(configuredPort);
+  if (occupant?.pid !== undefined && occupant.fingerprint !== fingerprint) await stopStaleServer({ pid: occupant.pid, port: configuredPort, ...(occupant.startedAt === undefined ? {} : { startedAt: occupant.startedAt }) });
   try {
     // NOTE: under a Bun-compiled pi binary process.execPath is the pi CLI, and Bun's node:http never writes the WebSocket 101 upgrade (oven-sh/bun#28157), so the server must run on a real node from PATH.
     const child = spawn(process.versions.bun ? "node" : process.execPath, [serverPath, "--port", String(configuredPort), "--lock", lockPath, "--fingerprint", fingerprint], { detached: true, stdio: "ignore" });
     const startupError = new Promise<never>((_resolve, reject) => { child.once("error", reject); });
     child.unref();
-    await Promise.race([waitForServer(configuredPort), startupError]);
+    await Promise.race([waitForServer(configuredPort, fingerprint), startupError]);
     return { port: configuredPort };
   } catch (error) {
     await rm(lockPath, { force: true });

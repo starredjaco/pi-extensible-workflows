@@ -109,6 +109,57 @@ async function staleLockIsReplaced(missingFingerprint: boolean): Promise<void> {
 void test("healthy Trajectory lock with a different fingerprint is replaced", async () => { await staleLockIsReplaced(false); });
 void test("healthy Trajectory lock without a fingerprint is replaced", async () => { await staleLockIsReplaced(true); });
 
+async function serverIdentity(port: number): Promise<{ pid?: number; fingerprint?: string } | undefined> {
+  try { return await (await fetch(`http://127.0.0.1:${String(port)}/health`, { signal: AbortSignal.timeout(300) })).json() as { pid?: number; fingerprint?: string }; } catch { return undefined; }
+}
+
+void test("an orphan Trajectory server missing from the lock is replaced instead of adopted", async () => {
+  const home = await mkdtemp(join(tmpdir(), "trajectory-lock-orphan-"));
+  const port = await availablePort();
+  const controllers: TrajectoryController[] = [];
+  const pids: number[] = [];
+  try {
+    // An older server keeps the port while its lock is gone, as after a lost or overwritten lock file.
+    const orphanLock = join(home, "orphan.lock");
+    const childScript = `const { createTrajectoryServer } = await import(${JSON.stringify(new URL("../src/server.js", import.meta.url).href)}); createTrajectoryServer(${String(port)}, ${JSON.stringify(orphanLock)}, { fingerprint: "older" }).listen(${String(port)}, "127.0.0.1"); setInterval(() => {}, 1000);`;
+    const orphan = spawn(process.execPath, ["--input-type=module", "-e", childScript], { stdio: "ignore" });
+    assert.ok(orphan.pid);
+    pids.push(orphan.pid);
+    for (let attempt = 0; attempt < 100 && (await serverIdentity(port))?.fingerprint !== "older"; attempt += 1) await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.equal((await serverIdentity(port))?.pid, orphan.pid);
+
+    const controller = createTrajectoryController(home);
+    controllers.push(controller);
+    await controller.open(input(home, port));
+    await controller.close();
+    const lock = await readLock(home);
+    pids.push(lock.pid);
+
+    const served = await serverIdentity(port);
+    assert.equal(served?.fingerprint, await currentFingerprint());
+    assert.notEqual(served.pid, orphan.pid);
+    assert.equal(lock.pid, served.pid);
+  } finally {
+    await cleanup(home, controllers, pids);
+  }
+});
+
+void test("a server without an identity on the Trajectory port is reported instead of adopted", async () => {
+  const home = await mkdtemp(join(tmpdir(), "trajectory-lock-legacy-"));
+  const port = await availablePort();
+  const { createServer: createHttpServer } = await import("node:http");
+  const legacy = createHttpServer((_request, response) => { response.writeHead(200, { "content-type": "application/json" }); response.end('{"ok":true}'); });
+  await new Promise<void>((resolve) => { legacy.listen(port, "127.0.0.1", resolve); });
+  const controller = createTrajectoryController(home);
+  try {
+    await assert.rejects(controller.open(input(home, port)), /held by another Trajectory server/);
+  } finally {
+    try { await controller.close(); } catch { /* Test cleanup is best effort. */ }
+    await new Promise<void>((resolve) => { legacy.close(() => { resolve(); }); });
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
 void test("unhealthy live Trajectory lock waits without killing the startup process", async () => {
   const home = await mkdtemp(join(tmpdir(), "trajectory-lock-startup-"));
   const port = await availablePort();

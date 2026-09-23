@@ -246,6 +246,7 @@ type TrajectoryServerOptions = { maxFrameBytes?: number; fingerprint?: string };
 export function createTrajectoryServer(port: number, lockPath: string, options: TrajectoryServerOptions = {}): Server {
   const maxFrameBytes = options.maxFrameBytes ?? MAX_FRAME_BYTES;
   const serverFingerprint = options.fingerprint ?? "";
+  let startedAt = 0;
   const clients = new Set<Client>();
   const publishers = new Map<string, { client: Client; value: Record<string, unknown>; generation: number }>();
   let latest: State = { type: "state", publishers: [], updatedAt: Date.now(), initial: true };
@@ -461,7 +462,8 @@ export function createTrajectoryServer(port: number, lockPath: string, options: 
     catch { writeJson(response, 400, { error: "Invalid request" }); return; }
     if (!authorized(request, port)) { writeJson(response, 403, { error: "Forbidden" }); return; }
     const path = url.pathname;
-    if (request.method === "GET" && path === "/health") { writeJson(response, 200, { ok: true }); return; }
+    // The identity lets an attaching Pi tell its own server from any other one answering on the port.
+    if (request.method === "GET" && path === "/health") { writeJson(response, 200, { ok: true, pid: process.pid, fingerprint: serverFingerprint, startedAt }); return; }
     if (request.method === "GET" && (path === "/" || path === "/index.html")) {
       void readFile(new URL("./assets/index.html", import.meta.url)).then((html) => {
         response.writeHead(200, { "content-type": "text/html; charset=utf-8", "content-length": html.byteLength, "cache-control": "no-store" });
@@ -519,7 +521,7 @@ export function createTrajectoryServer(port: number, lockPath: string, options: 
     // A dropped tab only sends FIN, and an upgraded socket stays half-open until this side closes it.
     socket.on("end", () => { socket.destroy(); });
   });
-  server.once("listening", () => { void writeFile(lockPath, `${JSON.stringify({ pid: process.pid, port, fingerprint: serverFingerprint, startedAt: Date.now() })}\n`, { mode: 0o600 }).catch(() => { process.exitCode = 1; }); scheduleIdleExit(); });
+  server.once("listening", () => { startedAt = Date.now(); void writeFile(lockPath, `${JSON.stringify({ pid: process.pid, port, fingerprint: serverFingerprint, startedAt })}\n`, { mode: 0o600 }).catch(() => { process.exitCode = 1; }); scheduleIdleExit(); });
   server.on("close", () => { closed = true; if (idleTimer !== undefined) { clearTimeout(idleTimer); idleTimer = undefined; } });
   return server;
 }
