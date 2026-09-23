@@ -1,6 +1,12 @@
 # Changelog
 ## Unreleased
 
+## [5.16.3] - 2026-09-23
+
+### Fixes
+
+- A live foreground workflow block taller than the terminal no longer snaps pi's scrollback to the bottom on every update. Past `rows - 10` lines the block turns compact: finished phases collapse to one summary line (done, failed, wall time, tokens, cost) plus their failures, and the current phase lists failed, active, and the three latest settled agents with a count of the rest. `ctrl+o` still shows everything, and a finished block keeps the full list.
+
 ## [5.16.2] - 2026-09-23
 
 ### New capabilities
