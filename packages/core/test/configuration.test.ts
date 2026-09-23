@@ -209,13 +209,11 @@ void test("strict settings use defaults and reject unknown or unsafe values", ()
   writeFileSync(path, JSON.stringify({ extensionSettings: { herdr: { enableFullyInspectableMode: true } } }));
   assert.equal(loadSettings(path).extensionSettings?.herdr?.enableFullyInspectableMode, true);
   writeFileSync(path, JSON.stringify({ extensionSettings: { trajectory: { port: 7432 } } }));
-  assert.deepEqual(loadSettings(path).extensionSettings?.trajectory, { port: 7432, themes: false });
-  writeFileSync(path, JSON.stringify({ extensionSettings: { trajectory: { themes: true } } }));
-  assert.deepEqual(loadSettings(path).extensionSettings?.trajectory, { themes: true });
-  writeFileSync(path, JSON.stringify({ extensionSettings: { trajectory: { port: 7432, themes: true } } }));
-  assert.deepEqual(loadSettings(path).extensionSettings?.trajectory, { port: 7432, themes: true });
+  assert.deepEqual(loadSettings(path).extensionSettings?.trajectory, { port: 7432 });
   writeFileSync(path, JSON.stringify({ extensionSettings: { trajectory: {} } }));
-  assert.deepEqual(loadSettings(path).extensionSettings?.trajectory, { themes: false });
+  assert.deepEqual(loadSettings(path).extensionSettings?.trajectory, {});
+  writeFileSync(path, JSON.stringify({ extensionSettings: { trajectory: { themes: true } } }));
+  assert.throws(() => loadSettings(path), (error: unknown) => error instanceof WorkflowError && error.code === "INVALID_SETTINGS");
   for (const value of [0, -1, 1.5, "7432", 65536]) {
     writeFileSync(path, JSON.stringify({ extensionSettings: { trajectory: { port: value } } }));
     assert.throws(() => loadSettings(path), (error: unknown) => error instanceof WorkflowError && error.code === "INVALID_SETTINGS");
@@ -240,6 +238,7 @@ void test("decodes persisted built-in extension settings with value validation",
   }
   assert.equal(snapshot({ concurrency: 1, extensions: { trajectory: { port: 0 } } }), undefined);
   assert.equal(snapshot({ concurrency: 1 }, { reviewer: { extensionSettings: { herdr: { enableFullyInspectableMode: "yes" } } } }), undefined);
+  assert.deepEqual(snapshot({ concurrency: 1, extensionSettings: { trajectory: { port: 7432, themes: false } } })?.settings.extensionSettings?.trajectory, { port: 7432 });
   const valid = snapshot({ concurrency: 1, extensionSettings: { acme: { nested: [true, "value"] }, trajectory: { port: 7432 } } }, { reviewer: { prompt: "Review", extensionSettings: { acme: { role: true } } } });
   assert.ok(valid);
   assert.deepEqual(valid.settings.extensionSettings, { acme: { nested: [true, "value"] }, trajectory: { port: 7432 } });

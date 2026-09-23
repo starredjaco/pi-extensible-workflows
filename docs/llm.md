@@ -79,7 +79,7 @@ Supported settings shape:
   },
   "skills": ["*", "!experimental-*"],
   "extensions": ["**/*", "!**/unsafe.mjs"],
-  "extensionSettings": { "herdr": { "enableFullyInspectableMode": true }, "trajectory": { "port": 7432, "themes": true } },
+  "extensionSettings": { "herdr": { "enableFullyInspectableMode": true }, "trajectory": { "port": 7432 } },
   "tools": ["*", "!write"],
   "retention": { "olderThanDays": 30, "maxTerminalRuns": 200 }
 }
@@ -89,7 +89,7 @@ The strict top-level settings keys are exactly `concurrency`, `backgroundWidget`
 
 ### Trajectory
 
-`extensionSettings.trajectory.port` is the local Trajectory HTTP server port and must be a positive integer when configured. If Trajectory settings are absent, the server defaults to `7432`. A valid `PI_WORKFLOW_TRAJECTORY_PORT` environment variable overrides the configured port. `extensionSettings.trajectory.themes` enables the Harness, TTY, and Paper theme switcher; it defaults to `false` (TTY is always the default). Trajectory auto-attaches by default without opening a browser when a session restores persisted workflow runs or after its first successful workflow launch, once per interactive Pi session. `/workflow trajectory` remains the manual re-open and starts or attaches to the local Trajectory server and opens its browser UI. Stale Trajectory servers are replaced when the server or UI files change. Workflow-agent sessions persist one `pi-workflows:tool-timing` JSONL entry per completed tool with start, completion, duration, and error status; a tool that crashes before completion has no duration record. Trajectory loads up to 400 non-timing transcript entries per agent and retains their matching timing records.
+`extensionSettings.trajectory.port` is the local Trajectory HTTP server port and must be a positive integer when configured. If Trajectory settings are absent, the server defaults to `7432`. A valid `PI_WORKFLOW_TRAJECTORY_PORT` environment variable overrides the configured port. The browser UI follows the system light or dark preference; a toggle in the sidebar overrides it per browser. Trajectory auto-attaches by default without opening a browser when a session restores persisted workflow runs or after its first successful workflow launch, once per interactive Pi session. `/workflow trajectory` remains the manual re-open and starts or attaches to the local Trajectory server and opens its browser UI. Stale Trajectory servers are replaced when the server or UI files change. Workflow-agent sessions persist one `pi-workflows:tool-timing` JSONL entry per completed tool with start, completion, duration, and error status; a tool that crashes before completion has no duration record. Trajectory loads up to 400 non-timing transcript entries per agent and retains their matching timing records.
 Trajectory also publishes current-session durable standalone subagents as first-class entities, not fabricated workflow runs. In the browser sidebar they appear in a sibling `SUBAGENTS` section for each publisher; the home view has one Gantt lane per subagent with tool timings, and selecting one opens its transcript, model, tools, accounting, result or failure, and worktree view. Use Agent details to inspect Prompt, Tools, Skills, Extensions, Environment, and Output without selecting a system-prompt event. Running subagents expose Stop and Steer, while failed or stopped subagents expose Retry; retry creates a new subagent ID and follows it in the UI. Pause, resume, and checkpoint controls do not apply to subagents.
 
 ### Concurrency

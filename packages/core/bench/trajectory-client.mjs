@@ -184,7 +184,7 @@ let frameBytes = 0;
 const sendState = () => {
   const frame = JSON.stringify({
     type: "publisher:state",
-    publisher: { id: publisherId, title: "bench session", cwd: "/repo", sessionId: "bench-session", themes: false, connected: true },
+    publisher: { id: publisherId, title: "bench session", cwd: "/repo", sessionId: "bench-session", connected: true },
     runs: Array.from({ length: RUNS }, (_, index) => runMetadata(tick, index)),
     subagents: [],
   });

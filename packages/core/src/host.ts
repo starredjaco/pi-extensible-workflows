@@ -418,7 +418,6 @@ export default function workflowExtension(pi: WorkflowExtensionAPI, home?: strin
     const trusted = projectTrusted(context);
     const settings = resolveWorkflowSettings(cwd, trusted, workflowSettingsPath(extensionAgentDir)).effective.extensionSettings?.trajectory;
     const port = settings?.port;
-    const themes = settings?.themes ?? false;
     const loadRuns = createTrajectoryRunLoader(cwd, sessionId, home, overlayLiveRun);
     const loadSubagents = createTrajectorySubagentLoader(cwd, sessionId, extensionAgentDir, overlayLiveSubagent);
     const loadRunsMetadata = createTrajectoryRunMetadataLoader(cwd, sessionId, home, overlayLiveRun);
@@ -427,7 +426,7 @@ export default function workflowExtension(pi: WorkflowExtensionAPI, home?: strin
       const live = liveSubagents.get(subagentId);
       return live?.status.sessionId === sessionId ? live.status.attemptDetails?.at(-1)?.session : undefined;
     });
-    return { cwd, sessionId, ...(port === undefined ? {} : { port }), themes, loadRuns, loadSubagents, loadMetadata: async () => ({ runs: await loadRunsMetadata(), subagents: await loadSubagentsMetadata() }), loadTranscript, handleAction: (request: Readonly<TrajectoryActionRequest>) => trajectoryAction(request, context) };
+    return { cwd, sessionId, ...(port === undefined ? {} : { port }), loadRuns, loadSubagents, loadMetadata: async () => ({ runs: await loadRunsMetadata(), subagents: await loadSubagentsMetadata() }), loadTranscript, handleAction: (request: Readonly<TrajectoryActionRequest>) => trajectoryAction(request, context) };
   };
   const withLiveActivities = (run: PersistedRun): PersistedRun => liveAgents.overlay(run);
   /** Overlays the in-memory lifecycle state and budget usage of an active run onto its persisted record. */

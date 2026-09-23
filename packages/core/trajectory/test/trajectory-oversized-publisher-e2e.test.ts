@@ -283,7 +283,7 @@ void test("Trajectory keeps a real oversized publisher alive and reconnects its 
     const fullPublisherPayload = JSON.stringify({ type: "publisher:state", publisher: { id: publisherId(fixture.cwd), cwd: fixture.cwd, sessionId: SESSION_ID, title: "oversized" }, runs: loaded, subagents });
     assert.ok(Buffer.byteLength(fullPublisherPayload) >= INCIDENT_PAYLOAD_BYTES, `fixture publisher payload was only ${String(Buffer.byteLength(fullPublisherPayload))} bytes`);
     const actions: JsonRecord[] = [];
-    const input: TrajectoryPublisherInput = { cwd: fixture.cwd, sessionId: SESSION_ID, port, themes: false, loadRuns: fixture.loadRuns, loadSubagents: async () => subagents, loadMetadata: fixture.loadMetadata, loadTranscript: fixture.loadTranscript, handleAction: async (request) => { actions.push(request); return { id: "action-result", state: "running" }; } };
+    const input: TrajectoryPublisherInput = { cwd: fixture.cwd, sessionId: SESSION_ID, port, loadRuns: fixture.loadRuns, loadSubagents: async () => subagents, loadMetadata: fixture.loadMetadata, loadTranscript: fixture.loadTranscript, handleAction: async (request) => { actions.push(request); return { id: "action-result", state: "running" }; } };
     controller = createTrajectoryController(fixture.agentDir);
     await controller.open(input);
     await waitForHealth(port, true);

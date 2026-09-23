@@ -144,7 +144,7 @@ async function withChrome(url: string, callback: (page: Devtools) => Promise<voi
 function makeState(output: Record<string, unknown>, state: "running" | "completed"): Record<string, unknown> {
   const agent = { id: "agent", name: "fixture-agent", label: "fixture-agent", state, attempts: 1, startedAt: 1, durationMs: state === "completed" ? 10 : undefined, model: { provider: "fixture", model: "model" }, requestedModel: "fixture/request", role: "reviewer", tools: ["read"], skills: ["review"], extensions: ["fixture"], prompt: "Inspect the fixture", systemPrompt: "System prompt", output, attemptDetails: [{ attempt: 1, transport: "local", setup: { cwd: "/project", model: { provider: "fixture", model: "model" }, tools: ["read"] } }] };
   const run = { id: "run", workflowName: "fixture", cwd: "/project", sessionId: "session", state, agents: [agent], transcripts: { agent: [{ type: "message", timestamp: "2025-01-01T00:00:00.000Z", message: { role: "assistant", content: [{ type: "text", text: "transcript" }] } }] }, snapshot: { script: "return true;" } };
-  return { type: "state", publishers: [{ id: "publisher", title: "fixture", cwd: "/project", sessionId: "session", connected: true, themes: true, runs: [{ run }], subagents: [] }], updatedAt: 1 };
+  return { type: "state", publishers: [{ id: "publisher", title: "fixture", cwd: "/project", sessionId: "session", connected: true, runs: [{ run }], subagents: [] }], updatedAt: 1 };
 }
 
 function clickExpression(selector: string): string { return `document.querySelector(${JSON.stringify(selector)}).click()`; }
@@ -234,7 +234,7 @@ void test("Trajectory live gantt keeps cached timing, merges dense calls, and pa
     // Only the running agent gains calls, so the done agent's timing is omitted after its first delivery.
     const live = Array.from({ length: tick }, (_, index) => toolTiming(`live-${String(index)}`, start + 560_000 + index * 15_000, 4_000));
     const run = { id: "live", workflowName: "live-workflow", cwd: "/project", sessionId: "session", state: "running", agents: [agent("done", false), agent("busy", true)], agentSessions: [], events: [] };
-    publisher.send(JSON.stringify({ type: "publisher:state", publisher: { id: publisherId, title: "live", cwd: "/project", sessionId: "session", themes: false, connected: true }, runs: [{ run, snapshot: { script: "return true;" }, transcripts: { done: { revision: 1, status: "available", timing: baseline }, busy: { revision: 100 + tick, status: "available", timing: [...baseline, ...live] } } }], subagents: [] }));
+    publisher.send(JSON.stringify({ type: "publisher:state", publisher: { id: publisherId, title: "live", cwd: "/project", sessionId: "session", connected: true }, runs: [{ run, snapshot: { script: "return true;" }, transcripts: { done: { revision: 1, status: "available", timing: baseline }, busy: { revision: 100 + tick, status: "available", timing: [...baseline, ...live] } } }], subagents: [] }));
     tick += 1;
   };
   publish();

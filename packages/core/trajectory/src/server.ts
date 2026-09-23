@@ -127,7 +127,7 @@ function minimalPublisher(publisher: unknown): unknown {
 function tinyPublisher(publisher: unknown): unknown {
   if (!publisher || typeof publisher !== "object" || Array.isArray(publisher)) return { id: "publisher" };
   const value = publisher as Record<string, unknown>;
-  return { id: typeof value.id === "string" ? value.id.slice(0, 200) : "publisher", title: typeof value.title === "string" ? value.title.slice(0, 200) : undefined, cwd: typeof value.cwd === "string" ? value.cwd.slice(0, 1024) : undefined, sessionId: typeof value.sessionId === "string" ? value.sessionId.slice(0, 200) : undefined, themes: value.themes, connected: value.connected === true };
+  return { id: typeof value.id === "string" ? value.id.slice(0, 200) : "publisher", title: typeof value.title === "string" ? value.title.slice(0, 200) : undefined, cwd: typeof value.cwd === "string" ? value.cwd.slice(0, 1024) : undefined, sessionId: typeof value.sessionId === "string" ? value.sessionId.slice(0, 200) : undefined, connected: value.connected === true };
 }
 function encodePublisherList(publishers: readonly unknown[], updatedAt: number, maxBytes: number, initial: boolean, truncated: boolean, projector: (publisher: unknown) => unknown, fallback?: (publisher: unknown) => unknown): { serialized: string; truncated: boolean } {
   const prefix = `{"type":"state","publishers":[`;

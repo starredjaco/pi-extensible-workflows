@@ -1,6 +1,14 @@
 # Changelog
 ## Unreleased
 
+### Breaking changes
+
+- `extensionSettings.trajectory.themes` is removed; settings files that still set it fail validation. Persisted launch snapshots that carry it still load.
+
+### New capabilities
+
+- Trajectory has a paper-style look in light and dark versions. It follows the system colour scheme, and a sidebar toggle overrides it per browser. On phones it shows one panel at a time, with Runs, Trace, and Details tabs.
+
 ## [5.15.0] - 2026-09-18
 
 ### New capabilities

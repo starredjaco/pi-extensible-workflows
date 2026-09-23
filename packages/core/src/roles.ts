@@ -34,7 +34,7 @@ export function parseRoleMarkdown(content: string, strict = false, rolePath?: st
       catch (error) { fail("INVALID_METADATA", `Invalid role extensionSettings: ${errorText(error)}`); }
     }
     const rolePathValue = rolePath ?? "<role>";
-    const normalizedExtensionSettings = validateWorkflowExtensionSettings(extensionSettings, rolePathValue, "INVALID_METADATA", false);
+    const normalizedExtensionSettings = validateWorkflowExtensionSettings(extensionSettings, rolePathValue, "INVALID_METADATA");
     const definition: AgentDefinition = { prompt: content.slice(end + 4).replace(/^\n/, "") };
     if (meta.model) {
       const model = unquote(meta.model);
@@ -71,7 +71,7 @@ export function parseRoleMarkdown(content: string, strict = false, rolePath?: st
   const normalizedTools = validateSelectorList(tools, rolePathValue, "tools", "INVALID_METADATA");
   const normalizedSkills = validateSelectorList(skills, rolePathValue, "skills", "INVALID_METADATA");
   const normalizedExtensions = validateSelectorList(extensions, rolePathValue, "extensions", "INVALID_METADATA");
-  const normalizedExtensionSettings = validateWorkflowExtensionSettings(extensionSettings, rolePathValue, "INVALID_METADATA", false);
+  const normalizedExtensionSettings = validateWorkflowExtensionSettings(extensionSettings, rolePathValue, "INVALID_METADATA");
   const normalizedDescription = typeof description === "string" ? description.trim() : undefined;
   const normalizedModel = typeof model === "string" ? model.trim() : undefined;
   if (normalizedModel !== undefined) assertModelThinking(normalizedModel, "Role model");

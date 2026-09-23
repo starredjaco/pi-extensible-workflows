@@ -103,7 +103,6 @@ export type TrajectoryPublisherInput = {
   cwd: string;
   sessionId: string;
   port?: number;
-  themes: boolean;
   loadRuns: TrajectoryRunLoader;
   loadSubagents: TrajectorySubagentLoader;
   loadMetadata: TrajectoryPublisherMetadataLoader;

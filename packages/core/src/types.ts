@@ -90,7 +90,7 @@ export interface WorkflowModelAliasResolverContext { cwd: string; projectTrusted
 export interface WorkflowModelAlias { resolve: (context: Readonly<WorkflowModelAliasResolverContext>) => string | Promise<string> }
 export interface WorkflowMetadata { name: string; description?: string }
 export interface HerdrExtensionSettings { enableFullyInspectableMode?: boolean }
-export interface TrajectoryExtensionSettings { port?: number; themes?: boolean }
+export interface TrajectoryExtensionSettings { port?: number }
 export interface WorkflowExtensionSettings { readonly [namespace: string]: JsonValue; readonly herdr?: Readonly<HerdrExtensionSettings>; readonly trajectory?: Readonly<TrajectoryExtensionSettings> }
 export type WorkflowExtensionSettingsSource = "global" | "project" | "role" | "effective";
 export interface WorkflowExtensionSettingsValidatorContext { source: WorkflowExtensionSettingsSource; cwd: string; projectTrusted: boolean; settingsPath?: string; role?: string }

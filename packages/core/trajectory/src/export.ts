@@ -35,7 +35,7 @@ export async function exportTrajectoryRunHtml(options: TrajectoryExportOptions):
   ]);
   const state = {
     type: "state",
-    publishers: [{ id: `export-${options.runId}`, title: `run ${options.runId.slice(0, 8)}`, cwd: options.cwd, sessionId: options.sessionId, themes: true, connected: true, runs: [run], subagents: [] }],
+    publishers: [{ id: `export-${options.runId}`, title: `run ${options.runId.slice(0, 8)}`, cwd: options.cwd, sessionId: options.sessionId, connected: true, runs: [run], subagents: [] }],
     updatedAt: Date.now(),
   };
   // Base64 data URLs avoid </script> escaping issues inside inlined sources; JSON gets the standard \u003c escape.

@@ -392,7 +392,7 @@ export function createTrajectoryController(agentDir: string): TrajectoryControll
   const startPolling = () => { stopPolling(); pollTimer = setInterval(() => { void sendState().catch((error: unknown) => { if (!closing) console.error(`Trajectory state publish failed: ${errorText(error)}`); }); }, viewers > 0 ? ACTIVE_POLL_MS : IDLE_POLL_MS); pollTimer.unref(); };
   let stateLoad: { socket: TrajectoryPublisherClient; task: Promise<void> } | undefined;
   let lastState: string | undefined;
-  const publisherValue = (input: TrajectoryPublisherInput): LiveStateRecord => ({ id: publisherId(input.cwd, input.sessionId), title: `session ${input.sessionId.slice(0, 8)}`, cwd: input.cwd, sessionId: input.sessionId, themes: input.themes, connected: true });
+  const publisherValue = (input: TrajectoryPublisherInput): LiveStateRecord => ({ id: publisherId(input.cwd, input.sessionId), title: `session ${input.sessionId.slice(0, 8)}`, cwd: input.cwd, sessionId: input.sessionId, connected: true });
   const sendState = async (): Promise<void> => {
     const activeSocket = socket;
     if (activeSocket !== undefined && stateLoad?.socket === activeSocket) return stateLoad.task;

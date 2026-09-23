@@ -191,19 +191,17 @@ void test("Trajectory preference storage failures preserve defaults", () => {
   assert.doesNotThrow(() => { helpers.saveSidebarCollapsed(); });
 });
 
-void test("Trajectory theme preference storage failures preserve the default", () => {
+void test("Trajectory theme toggle cycles system, light, and dark even when storage fails", () => {
   const source = readFileSync(new URL("../src/assets/index.html", import.meta.url), "utf8");
-  const helperStart = source.indexOf("    function renderThemeButtons");
-  const helperEnd = source.indexOf("    function renderSidebar", helperStart);
+  const helperStart = source.indexOf("    // Without a pinned choice the page follows the system scheme");
+  const helperEnd = source.indexOf("    const subagentAccounting", helperStart);
   assert.ok(helperStart >= 0 && helperEnd > helperStart);
-  let clickHandler: (() => void) | undefined;
-  const button = { dataset: { theme: "harness" }, addEventListener: (_type: string, handler: () => void) => { clickHandler = handler; }, classList: { toggle: () => {} } };
-  const themeButtons = { innerHTML: "", classList: { toggle: () => {} }, querySelectorAll: () => [button] };
   const document = { documentElement: { dataset: {} as Record<string, string> } };
-  const helpers = runInNewContext(`(() => { const state = { publishers: [{ themes: true }] }; const $ = () => themeButtons; const patch = (root, html) => { root.innerHTML = html; }; ${source.slice(helperStart, helperEnd)}; return { document, renderThemeButtons }; })()`, { document, localStorage: { getItem: () => { throw new Error("storage unavailable"); }, setItem: () => { throw new Error("storage unavailable"); } }, themeButtons }) as { document: typeof document; renderThemeButtons: () => void };
-  helpers.renderThemeButtons();
-  assert.equal(helpers.document.documentElement.dataset.theme, "tty");
-  assert.doesNotThrow(() => { clickHandler?.(); });
+  const helpers = runInNewContext(`(() => { const renderSidebar = () => {}; ${source.slice(helperStart, helperEnd)}; return { toggleTheme, themeToggleHtml }; })()`, { document, localStorage: { setItem: () => { throw new Error("storage unavailable"); } } }) as { toggleTheme: () => void; themeToggleHtml: () => string };
+  assert.match(helpers.themeToggleHtml(), /Theme: system/);
+  const seen = [0, 1, 2].map(() => { helpers.toggleTheme(); return document.documentElement.dataset.theme ?? "auto"; });
+  assert.deepEqual(seen, ["light", "dark", "auto"]);
+  assert.match(source, /localStorage\.getItem\("traj-theme"\); if \(theme === "light" \|\| theme === "dark"\) document\.documentElement\.dataset\.theme = theme;/);
 });
 
 void test("Trajectory agent grid groups persisted agent scopes", () => {
@@ -286,7 +284,7 @@ void test("Trajectory run layout supports bounded Gantt resizing and persisted s
   assert.match(source, /\.swim \{[^}]*height: var\(--swim\)[^}]*overflow-y: auto/);
   assert.match(source, /\.swim \.axis \{ position: sticky; top: 0; z-index: 4; background: var\(--bg-2\); \}/);
   assert.match(source, /\.swim > \.now \{ top: 22px; bottom: 8px; z-index: 5; \}/);
-  assert.match(source, /#toggle-gantt \{ padding: 0 14px; \}/);
+  assert.match(source, /#toggle-gantt \{ padding: 14px 20px 6px; \}/);
   assert.match(source, /\.section-toggle \{[^}]*font: inherit;[^}]*cursor: pointer;/);
   assert.match(source, /id="split-swim"/);
   assert.match(source, /bindSplit\(\$\("split-swim"\), "--swim", 72, maxSwimHeight, \{ axis: "y"/);
@@ -516,8 +514,6 @@ void test("Trajectory compacts canonical skill reads without losing event detail
   const source = readFileSync(new URL("../src/assets/index.html", import.meta.url), "utf8");
   const helpers = loadTrajectoryPreviewHelpers(source);
   assert.match(source, /\.pill\.skill/);
-  assert.match(source, /html\[data-theme="paper"\] \.pill\.skill/);
-  assert.match(source, /html\[data-theme="tty"\] \.pill\.skill/);
   assert.match(source, /if \(detail\.kind === "tool" \|\| detail\.kind === "skill"\)/);
   assert.match(source, /<span class="pill \$\{detail\.kind\}">\$\{eventLabel\(detail\.kind\)\}<\/span>/);
   const readCall = (id: string, args: Record<string, unknown>) => ({ type: "message", message: { role: "assistant", content: [{ type: "toolCall", id, name: "read", arguments: args }] } });
@@ -885,7 +881,7 @@ void test("Trajectory sidebar subagent rows match the workflow run row shape", (
     const subagentLabel = (value) => value.label;
     const subagentCost = (value) => value.progress.accounting.cost;
     const subagentRuntime = () => 120000;
-    const renderThemeButtons = () => {};
+    const themeToggleHtml = () => "";
     ${source.slice(helperStart, helperEnd)}
     renderSidebar();
     return sidebar.innerHTML;

@@ -111,8 +111,9 @@ export function decodeWorkflowExtensions(value: unknown): WorkflowExtensionSetti
       continue;
     }
     if (namespace === "trajectory") {
+      // Snapshots persisted before the themes setting was removed still carry a boolean `themes`; it is accepted and dropped.
       if (!object(raw) || Object.keys(raw).some((key) => key !== "port" && key !== "themes") || raw.port !== undefined && (typeof raw.port !== "number" || !Number.isSafeInteger(raw.port) || raw.port < 1 || raw.port > 65535) || raw.themes !== undefined && typeof raw.themes !== "boolean") return undefined;
-      normalized.trajectory = { ...(raw.port === undefined ? {} : { port: raw.port }), ...(raw.themes === undefined ? {} : { themes: raw.themes }) };
+      normalized.trajectory = { ...(raw.port === undefined ? {} : { port: raw.port }) };
       continue;
     }
     if (!jsonValue(raw)) return undefined;

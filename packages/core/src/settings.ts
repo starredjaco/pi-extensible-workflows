@@ -60,7 +60,7 @@ export function validateContextFileScopes(value: unknown, rolePath: string): rea
   if (!Array.isArray(value) || !value.every(isContextFileScope)) fail("INVALID_METADATA", `${rolePath}.contextFiles must be an array containing only global, project, or cwd`);
   return [...value];
 }
-export function validateWorkflowExtensionSettings(value: unknown, settingsPath: string, errorCode: "INVALID_SETTINGS" | "INVALID_METADATA" = "INVALID_SETTINGS", applyDefaults = true): WorkflowExtensionSettings | undefined {
+export function validateWorkflowExtensionSettings(value: unknown, settingsPath: string, errorCode: "INVALID_SETTINGS" | "INVALID_METADATA" = "INVALID_SETTINGS"): WorkflowExtensionSettings | undefined {
   if (value === undefined) return undefined;
   const base = `${settingsPath}.extensionSettings`;
   if (!object(value)) fail(errorCode, `${base} must be an object`);
@@ -76,10 +76,9 @@ export function validateWorkflowExtensionSettings(value: unknown, settingsPath: 
     }
     if (namespace === "trajectory") {
       if (!object(raw)) fail(errorCode, `${base}.trajectory must be an object`);
-      if (Object.keys(raw).some((key) => key !== "port" && key !== "themes")) fail(errorCode, `${base}.trajectory contains an unsupported setting`);
+      if (Object.keys(raw).some((key) => key !== "port")) fail(errorCode, `${base}.trajectory contains an unsupported setting`);
       if (raw.port !== undefined && (!positiveInteger(raw.port) || raw.port > 65535)) fail(errorCode, `${base}.trajectory.port must be an integer from 1 to 65535`);
-      if (raw.themes !== undefined && typeof raw.themes !== "boolean") fail(errorCode, `${base}.trajectory.themes must be a boolean`);
-      normalized.trajectory = Object.freeze({ ...(raw.port === undefined ? {} : { port: raw.port }), ...(raw.themes === undefined ? (applyDefaults ? { themes: false } : {}) : { themes: raw.themes }) });
+      normalized.trajectory = Object.freeze({ ...(raw.port === undefined ? {} : { port: raw.port }) });
       continue;
     }
     if (!jsonValue(raw)) fail(errorCode, `${base}.${namespace} must be JSON-compatible`);
@@ -120,7 +119,7 @@ function parseSettings(path: string, partial: boolean): Readonly<WorkflowSetting
   const skills = validateSelectorList(parsed.skills, path, "skills");
   const tools = validateSelectorList(parsed.tools, path, "tools");
   const extensions = validateSelectorList(parsed.extensions, path, "extensions");
-  const extensionSettings = parsed.extensionSettings === undefined ? undefined : validateWorkflowExtensionSettings(parsed.extensionSettings, path, "INVALID_SETTINGS", !partial);
+  const extensionSettings = parsed.extensionSettings === undefined ? undefined : validateWorkflowExtensionSettings(parsed.extensionSettings, path, "INVALID_SETTINGS");
   const retention = validateRetention(parsed.retention, path);
   return Object.freeze({
     ...(concurrency === undefined ? {} : { concurrency }), ...(backgroundWidget === undefined ? {} : { backgroundWidget }), ...(modelAliases === undefined ? {} : { modelAliases }),
