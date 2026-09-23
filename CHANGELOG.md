@@ -1,6 +1,8 @@
 # Changelog
 ## Unreleased
 
+## [5.16.0] - 2026-09-23
+
 ### Breaking changes
 
 - `extensionSettings.trajectory.themes` is removed; settings files that still set it fail validation. Persisted launch snapshots that carry it still load.
@@ -8,6 +10,19 @@
 ### New capabilities
 
 - Trajectory has a paper-style look in light and dark versions. It follows the system colour scheme, and a sidebar toggle overrides it per browser. On phones it shows one panel at a time, with Runs, Trace, and Details tabs.
+- The Trajectory inspector shows workflow arguments (bounded for large values) (#300) and an Agent details Output tab (#301).
+
+### Performance
+
+- Foreground workflow progress bursts collapse to one update per 100ms, and progress reads `state.json` alone instead of state plus snapshot, so Pi no longer re-renders the whole tool block for every agent event.
+- Trajectory ships tool timing only for the run a browser shows and omits timing it already delivered at the same revision. The gantt patches only changed lanes and merges tool calls that overlap on screen.
+- Trajectory publishers poll every 10s while no browser is attached, and hidden tabs skip rendering.
+
+### Fixes
+
+- A Trajectory browser tab that drops without a WebSocket close frame is released, so viewer counts and pending requests no longer leak.
+- Live Trajectory timing keeps the newest entries within its 64 KB per-agent budget, so a long agent's gantt keeps growing instead of freezing on its first calls.
+- `piewf` `npx` examples use the scoped `@piewf/cli` package.
 
 ## [5.15.0] - 2026-09-18
 
