@@ -852,7 +852,7 @@ void test("Trajectory renders a publisher subagent sidebar section", () => {
 });
 void test("Trajectory sidebar subagent rows match the workflow run row shape", () => {
   const source = readFileSync(new URL("../src/assets/index.html", import.meta.url), "utf8");
-  const helperStart = source.indexOf("    function renderSidebar");
+  const helperStart = source.indexOf("    // A session shows every active entry");
   const helperEnd = source.indexOf("    function renderGantt", helperStart);
   assert.ok(helperStart >= 0 && helperEnd > helperStart);
   const result = runInNewContext(`(() => {
@@ -882,6 +882,7 @@ void test("Trajectory sidebar subagent rows match the workflow run row shape", (
     const subagentCost = (value) => value.progress.accounting.cost;
     const subagentRuntime = () => 120000;
     const themeToggleHtml = () => "";
+    const isActiveRun = () => false;
     ${source.slice(helperStart, helperEnd)}
     renderSidebar();
     return sidebar.innerHTML;
@@ -1240,4 +1241,27 @@ void test("Trajectory lists runs by newest completion with running runs on top",
   const record = (id: string, state: string, startedAt: number, durationMs?: number) => ({ run: { id, state, agents: [{ startedAt, ...(durationMs === undefined ? {} : { durationMs }) }] } });
   const ordered = helpers.runsByCompletion({ runs: [record("old-done", "completed", 1_000, 1_000), record("old-running", "running", 2_000), record("late-done", "failed", 1_500, 10_000), record("new-running", "running", 3_000), record("mid-done", "stopped", 5_000, 1_000)] });
   assert.deepEqual(ordered.runs.map((value) => value.run.id), ["new-running", "old-running", "late-done", "mid-done", "old-done"]);
+});
+
+void test("Trajectory sidebar shows every active entry, at least three, and keeps the selection visible", () => {
+  const source = readFileSync(new URL("../src/assets/index.html", import.meta.url), "utf8");
+  const helperStart = source.indexOf("    // A session shows every active entry");
+  const helperEnd = source.indexOf("    function renderSidebar", helperStart);
+  assert.ok(helperStart >= 0 && helperEnd > helperStart);
+  const collapsed = new Set<string>();
+  const helpers = runInNewContext(`(() => { const esc = (value) => String(value); ${source.slice(helperStart, helperEnd)}; return { sidebarWindow }; })()`, { state: { sidebarCollapsed: collapsed } }) as { sidebarWindow: (items: string[], key: string, active: (item: string) => boolean, selected: (item: string) => boolean) => { visible: string[]; more: string } };
+  // Values cross the VM realm, so compare plain copies.
+  const sidebarWindow = (...args: Parameters<typeof helpers.sidebarWindow>) => JSON.parse(JSON.stringify(helpers.sidebarWindow(...args))) as { visible: string[]; more: string };
+  const active = (item: string) => item.startsWith("live");
+  const none = () => false;
+  assert.deepEqual(sidebarWindow(["a", "b", "c"], "k", active, none), { visible: ["a", "b", "c"], more: "" });
+  const five = sidebarWindow(["a", "b", "c", "d", "e"], "k", active, none);
+  assert.deepEqual(five.visible, ["a", "b", "c"]);
+  assert.match(five.more, /data-sidebar-section="k"[^>]*>\+ 2 more</);
+  assert.deepEqual(sidebarWindow(["live1", "live2", "live3", "live4", "done"], "k", active, none).visible, ["live1", "live2", "live3", "live4"]);
+  assert.deepEqual(sidebarWindow(["a", "b", "c", "d", "e"], "k", active, (item) => item === "e").visible, ["a", "b", "c", "e"]);
+  collapsed.add("k");
+  const expanded = sidebarWindow(["a", "b", "c", "d", "e"], "k", active, none);
+  assert.deepEqual(expanded.visible, ["a", "b", "c", "d", "e"]);
+  assert.match(expanded.more, /show less/);
 });

@@ -65,6 +65,8 @@
     .run-item { display: flex; align-items: center; gap: 8px; width: 100%; text-align: left; border: 0; background: none; color: var(--dim); padding: 4px 6px; border-radius: 8px; font-size: 12px; }
     .run-item:hover { background: var(--bg-hover); }
     .run-item.on { background: var(--bg-sel); color: var(--text); box-shadow: inset 3px 0 0 var(--warn); }
+    .more-items.section-toggle { margin: 2px 0; padding: 4px 6px; color: var(--mute); font-size: 11px; border-radius: 8px; }
+    .more-items.section-toggle:hover { color: var(--text); background: var(--bg-hover); }
     .subagents-head { margin: 4px 0 2px; padding: 3px 6px; font-size: 10px; letter-spacing: .08em; color: var(--mute); }
     .steer-input { min-width: 180px; flex: 1; background: var(--bg-3); border: 1px solid var(--line); border-radius: 8px; padding: 6px 8px; }
     .g-run { width: 14px; flex: none; display: inline-block; text-align: center; font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 13px; line-height: 1; }
@@ -427,7 +429,8 @@
     const startOf = (record) => { const times = record.run.agents.map((agent) => agent.startedAt).filter((time) => Number.isFinite(time)); const created = Date.parse(record.createdAt || ""); return new Date(Math.min(...times, Number.isFinite(created) ? created : Date.now())); };
     const endOf = (record) => { const start = startOf(record).getTime(); const ends = record.run.agents.map((agent) => agent.startedAt && agent.durationMs ? agent.startedAt + agent.durationMs : 0); return Math.max(start + 1, ...ends, record.run.state === "running" || record.run.state === "paused" || record.run.state === "awaiting_input" ? Date.now() : start + (record.run.usage?.durationMs || 0)); };
     // Newest completion first; runs still going have no end yet, so they stay on top, newest start first.
-    const runsByCompletion = (publisher) => { if (!Array.isArray(publisher.runs)) return publisher; const keyed = publisher.runs.map((record) => ({ record, end: ["running", "paused", "awaiting_input"].includes(record.run.state) ? Infinity : endOf(record), start: startOf(record).getTime() })); keyed.sort((left, right) => right.end - left.end || right.start - left.start); return { ...publisher, runs: keyed.map(({ record }) => record) }; };
+    const isActiveRun = (record) => ["running", "paused", "awaiting_input"].includes(record.run.state);
+    const runsByCompletion = (publisher) => { if (!Array.isArray(publisher.runs)) return publisher; const keyed = publisher.runs.map((record) => ({ record, end: isActiveRun(record) ? Infinity : endOf(record), start: startOf(record).getTime() })); keyed.sort((left, right) => right.end - left.end || right.start - left.start); return { ...publisher, runs: keyed.map(({ record }) => record) }; };
     const attention = (record) => (record.awaiting || []).length + record.run.agents.filter((agent) => agent.state === "failed").length;
     const duration = (record) => Math.max(0, endOf(record) - startOf(record).getTime());
     const age = (stamp) => { const minutes = Math.floor((Date.now() - stamp) / 60000); return minutes < 60 ? `${minutes}m ago` : `${Math.floor(minutes / 60)}h ago`; };
@@ -598,6 +601,15 @@
     const subagentAttention = (subagent) => subagent.state === "failed" ? 1 : 0;
     const subagentModel = (subagent) => subagent.model ? `${subagent.model.provider || "?"}/${subagent.model.model || "?"}` : "—";
     const subagentLabel = (subagent) => subagent.label || subagent.id.slice(0, 8);
+    // A session shows every active entry and at least three in total; the rest wait behind a "more" toggle, and the selected entry always stays visible.
+    // The toggle reuses the persisted sidebar section set, where membership of this key means expanded.
+    function sidebarWindow(items, key, active, selected) {
+      const limit = Math.max(3, items.filter(active).length);
+      if (items.length <= limit) return { visible: items, more: "" };
+      const expanded = state.sidebarCollapsed.has(key);
+      const visible = expanded ? items : items.filter((item, index) => index < limit || selected(item));
+      return { visible, more: `<button type="button" class="more-items section-toggle" data-sidebar-section="${esc(key)}" aria-expanded="${expanded}">${expanded ? "show less" : `+ ${items.length - visible.length} more`}</button>` };
+    }
     function renderSidebar() {
       const groups = sidebarGroups(livePublishers());
       const html = groups.map((group) => {
@@ -605,20 +617,23 @@
         const collapsed = state.sidebarCollapsed.has(group.key);
         const sessions = group.publishers.map((publisher) => {
           const publisherAttention = (publisher.runs || []).reduce((total, record) => total + attention(record), 0) + (publisher.subagents || []).reduce((total, subagent) => total + subagentAttention(subagent), 0);
-          const runs = (publisher.runs || []).map((record) => {
+          const selectedKey = targetKey(currentTarget() || {});
+          const runWindow = sidebarWindow(publisher.runs || [], `more:runs:${publisher.id}`, isActiveRun, (record) => selectedKey === `run:${runKey(publisher, record)}`);
+          const runs = runWindow.visible.map((record) => {
             const ref = runKey(publisher, record);
             const pending = record.awaiting?.length || attention(record);
             return `<button class="run-item${targetKey(currentTarget() || {}) === `run:${ref}` ? " on" : ""}" data-run="${esc(ref)}" data-publisher="${esc(publisher.id)}">${glyph(runState(record))}<span class="n">${esc(record.run.workflowName)}</span>${pending ? `<span class="await">${pending} attn</span>` : ""}<span class="tel" data-clock-kind="${record.run.state === "running" ? "runtime" : "age"}" data-clock-start="${startOf(record).getTime()}" data-clock-prefix="${esc(fmtCost(runCost(record)))}" data-clock-title-prefix="${esc(`${runState(record)} · ${fmtCost(runCost(record))}`)}" title="${esc(`${runState(record)} · ${fmtCost(runCost(record))} · ${fmtRuntime(duration(record))}`)}">${fmtCost(runCost(record))} · ${record.run.state === "running" ? fmtRuntime(Date.now() - startOf(record).getTime()) : age(startOf(record).getTime())}</span></button>`;
-          }).join("");
+          }).join("") + runWindow.more;
           const subagentSectionKey = `subagents:${publisher.id}`;
           const subagentsCollapsed = state.sidebarCollapsed.has(subagentSectionKey);
-          const subagents = (publisher.subagents || []).map((subagent) => {
+          const subagentWindow = sidebarWindow(publisher.subagents || [], `more:subagents:${publisher.id}`, (subagent) => subagent.state === "running", (subagent) => selectedKey === targetKey({ kind: "subagent", publisherId: publisher.id, id: subagent.id }));
+          const subagents = subagentWindow.visible.map((subagent) => {
             const ref = subagentKey(publisher, subagent);
             const target = { kind: "subagent", publisherId: publisher.id, id: subagent.id };
             const pending = subagentAttention(subagent);
             const telemetry = `${subagent.state} · ${fmtCost(subagentCost(subagent))} · ${fmtRuntime(subagentRuntime(subagent))}`;
             return `<button class="run-item subagent${targetKey(currentTarget() || {}) === targetKey(target) ? " on" : ""}" data-subagent="${esc(ref)}" data-publisher="${esc(publisher.id)}">${glyph(subagent.state)}<span class="n" title="${esc(subagent.id)}">${esc(subagentLabel(subagent))}</span>${pending ? `<span class="await">${pending} attn</span>` : ""}<span class="tel" data-clock-kind="${subagent.state === "running" ? "runtime" : "age"}" data-clock-start="${subagentStartOf(subagent)}" data-clock-prefix="${esc(fmtCost(subagentCost(subagent)))}" data-clock-title-prefix="${esc(`${subagent.state} · ${fmtCost(subagentCost(subagent))}`)}" title="${esc(telemetry)}">${fmtCost(subagentCost(subagent))} · ${subagent.state === "running" ? fmtRuntime(subagentRuntime(subagent)) : age(subagentStartOf(subagent))}</span></button>`;
-          }).join("");
+          }).join("") + subagentWindow.more;
           return `<div class="pub${publisher.id === state.currentPub ? " on" : ""}"><div class="row"><span class="dot live"></span><span class="name">${esc(publisher.title || publisher.id)}</span>${publisherAttention ? `<span class="attn">${publisherAttention}</span>` : ""}</div><div class="children">${runs || '<div class="hint">no runs</div>'}<button type="button" class="subagents-head section-toggle" data-sidebar-section="${esc(subagentSectionKey)}" aria-expanded="${!subagentsCollapsed}">${subagentsCollapsed ? "▸" : "▾"} SUBAGENTS <span class="count">${(publisher.subagents || []).length}</span></button>${subagentsCollapsed ? "" : subagents || '<div class="hint">no subagents</div>'}</div></div>`;
         }).join("");
         return `<div class="group"><button type="button" class="folder" data-sidebar-group="${esc(group.key)}" title="${esc(group.key)}" aria-expanded="${!collapsed}"><span class="marker">${collapsed ? "▸" : "▾"}</span><span class="name">${esc(group.label)}</span><span class="count">${group.publishers.length}</span>${groupAttention ? `<span class="attn">${groupAttention}</span>` : ""}</button>${collapsed ? "" : `<div class="group-children">${sessions}</div>`}</div>`;
