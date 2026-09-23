@@ -1,6 +1,17 @@
 # Changelog
 ## Unreleased
 
+## [5.16.2] - 2026-09-23
+
+### New capabilities
+
+- Trajectory highlights workflow scripts, JSON values (tool and workflow arguments, environment, and output), and fenced code in messages with a vendored Prism 1.30.0 build (JavaScript, TypeScript, JSON, bash, diff, Python).
+- Trajectory lists runs by newest completion with active runs on top. Each session shows every active run or subagent and at least three in total; the rest sit behind a "+ N more" toggle that is remembered per browser, and the selected entry always stays visible.
+
+### Fixes
+
+- Pi no longer adopts a Trajectory server that answers on the port without owning the lock, such as an older server whose lock was lost. `/health` now reports the server pid and fingerprint; a mismatching server that reports its pid is replaced, and one without an identity fails the attach with a clear error instead of serving outdated code indefinitely.
+
 ## [5.16.1] - 2026-09-23
 
 ### Fixes
