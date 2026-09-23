@@ -23,7 +23,7 @@ export { createSubagentManager, createUnavailableSubagentManager } from "./manag
 export { createRunStoreWorktreeAdapter, defaultWorktreeHome } from "./worktree.js";
 export type { SubagentWorktreeAdapter, SubagentWorktreeContext, SubagentWorktreeHandle, SubagentWorktreeRunStore } from "./worktree.js";
 
-type SubagentsExtensionAPI = Pick<ExtensionAPI, "registerTool"> & Partial<Pick<ExtensionAPI, "getActiveTools" | "on" | "sendMessage" | "registerCommand">>;
+type SubagentsExtensionAPI = Pick<ExtensionAPI, "registerTool"> & Partial<Pick<ExtensionAPI, "getActiveTools" | "on" | "sendMessage" | "registerCommand" | "appendEntry" | "registerEntryRenderer">>;
 
 function validateSubagentRunRequest(value: unknown): SubagentRunRequest {
   return normalizeSubagentRunRequest(value);
@@ -170,7 +170,8 @@ export function registerSubagentsExtension(pi: SubagentsExtensionAPI, options: S
   const onResourceWarning = sendMessage === undefined ? undefined : (message: string): void => {
     sendMessage.call(pi, { customType: "subagents", content: `Warning: ${message}`, display: true }, { deliverAs: "steer" });
   };
-  const widget = createSubagentBackgroundWidget();
+  const appendEntry = pi.appendEntry;
+  const widget = createSubagentBackgroundWidget({ ...(appendEntry === undefined ? {} : { appendEntry: (customType, data) => { appendEntry.call(pi, customType, data); } }), ...(pi.registerEntryRenderer === undefined ? {} : { registerEntryRenderer: pi.registerEntryRenderer.bind(pi) }) });
   const extension = createSubagentsExtension(options, activeTools, notify, (status, request) => { widget.update(status, request); const registry = loadingRegistry(); if (typeof registry.observeSubagentStatus === "function") registry.observeSubagentStatus(status, request); }, onResourceWarning);
   for (const tool of extension.tools) pi.registerTool(tool);
   if (pi.registerCommand !== undefined) registerSubagentNavigator(pi.registerCommand.bind(pi), extension.manager, storageDirectory(options), options.clipboard);

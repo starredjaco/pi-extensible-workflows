@@ -33,6 +33,14 @@ function testContext() {
   return {};
 }
 
+/** A notify that fails the test on warnings; the navigator reports caught errors, assertion failures included, as warnings. */
+function strictNotify(notices = []) {
+  return (message, level) => {
+    notices.push(message);
+    if (level === "warning" || level === "error") throw new Error(message);
+  };
+}
+
 test("registers five namespaced subagent tools and delegates to an injected manager", async () => {
   const calls = [];
   const manager = {
@@ -121,10 +129,10 @@ test("renders subagent calls and background or foreground progress consistently"
     { expanded: true, isPartial: false },
     theme,
     context,
-  ).render(80).join("\n");
-  assert.match(completed, /Subagent: scout.*\[completed\]/);
+  ).render(120).join("\n");
+  assert.match(completed, /Subagent: scout \[completed\] mode=foreground role=reviewer 5t · \$0\.001 runtime=/, "the header carries tokens and cost like the workflow header");
   assert.match(completed, /id=foreground/);
-  assert.match(completed, /tokens=14 cost=\$0\.001/);
+  assert.doesNotMatch(completed, /tokens=/);
   assert.equal(foregroundState.subagentSpinner, undefined);
 
   const retry = tools.find(({ name }) => name === "subagents_retry");
@@ -189,7 +197,7 @@ test("renders subagent calls and background or foreground progress consistently"
   assert.match(inspection, /value:.*"answer": 42/s);
 });
 
-test("pins live background subagents below the editor until they settle", async () => {
+test("pins live background subagents below the editor in the workflow frame and leaves one receipt each", async () => {
   const cwd = await mkdtemp(join(tmpdir(), "subagents-widget-"));
   await mkdir(join(cwd, ".pi", "pi-extensible-workflows"), { recursive: true });
   await writeFile(join(cwd, ".pi", "pi-extensible-workflows", "settings.json"), JSON.stringify({ concurrency: 16 }));
@@ -204,9 +212,13 @@ test("pins live background subagents below the editor until they settle", async 
   let widgetComponent;
   let renders = 0;
   const theme = { fg: (_color, text) => text, bold: (text) => text };
+  const receipts = [];
+  const entryRenderers = new Map();
   const pi = {
     registerTool(tool) { tools.push(tool); },
     on(name, handler) { handlers.set(name, handler); },
+    appendEntry(customType, data) { receipts.push({ customType, data }); },
+    registerEntryRenderer(customType, renderer) { entryRenderers.set(customType, renderer); },
   };
   registerSubagentsExtension(pi, {
     managerDependencies: {
@@ -252,7 +264,7 @@ test("pins live background subagents below the editor until they settle", async 
     await started.promise;
     assert.equal(launch.details.state, "running");
     assert.deepEqual(widgetCalls[0].options, { placement: "belowEditor" });
-    assert.match(widgetComponent.render(80).join("\n"), /Subagents \(1 running\).*Subagent: scout.*\[running\].*mode=background role=none/s);
+    assert.match(widgetComponent.render(80).join("\n"), /^╭ Subagent ─+╮\n│ \S scout +00:00 │\n╰─+╯$/);
     for (let index = 1; index < 16; index += 1) {
       const additional = await run.execute(`widget-call-${String(index)}`, { prompt: `watch ${String(index)}`, label: `scout-${String(index)}`, mode: "background" }, undefined, undefined, context);
       assert.equal(additional.details.state, "running");
@@ -261,19 +273,22 @@ test("pins live background subagents below the editor until they settle", async 
       await options.onProgress({ accounting: { input: 1, output: 2, cacheRead: 0, cacheWrite: 0, cost: 0 }, toolCalls: [], activity: { kind: "tool", text: `read-${String(index)}` }, lastEventAt: Date.now(), persist: false });
     }
     const freshFrame = widgetComponent.render(80).join("\n");
-    assert.doesNotMatch(freshFrame, /stalled\?/);
+    assert.doesNotMatch(freshFrame, /quiet|stalled/);
+    await executionOptions[1].onProgress({ accounting: { input: 1, output: 2, cacheRead: 0, cacheWrite: 0, cost: 0 }, toolCalls: [], lastEventAt: Date.now() - 3 * 60 * 1000 - 1, persist: false });
     await executionOptions[0].onProgress({ accounting: { input: 1, output: 2, cacheRead: 0, cacheWrite: 0, cost: 0 }, toolCalls: [], activity: { kind: "tool", text: "read-0" }, lastEventAt: Date.now() - WORKFLOW_AGENT_STALL_THRESHOLD_MS - 1, persist: false });
-    const staleFrame = widgetComponent.render(80).join("\n");
-    assert.match(staleFrame, /read-0 - stalled\? 10m/);
     const frame = widgetComponent.render(80);
     assert.equal(frame.length, 10);
-    assert.match(frame[0], /Subagents \(16 running\)/);
-    assert.match(frame[1], /Subagent: scout /);
-    assert.match(frame[7], /Subagent: scout-3 /);
-    assert.match(frame[8], /read-3/);
-    assert.equal(frame[9], "… 12 more");
+    assert.ok(frame.every((line) => visibleWidth(line) === 80), frame.join("\n"));
+    assert.match(frame[0], /^╭ Subagents · 16 runs ─+╮$/);
+    assert.match(frame[1], /^│ ⚠ scout {2}stalled 10:00 +3t · 00:0\d │$/);
+    assert.match(frame[2], /^│ ⚠ scout-1 {2}quiet 03:00 +3t · 00:0\d │$/);
+    assert.match(frame[3], /^│ \S scout-2 +3t · 00:0\d │$/);
+    assert.match(frame[7], /^│ \S scout-6 +3t · 00:0\d │$/);
+    assert.match(frame[8], /^│ … 9 more +│$/);
+    assert.match(frame[9], /^╰─+╯$/);
     const narrowFrame = widgetComponent.render(24);
     assert.equal(narrowFrame.length, 10);
+    assert.ok(narrowFrame.every((line) => visibleWidth(line) <= 24), narrowFrame.join("\n"));
     assert.match(narrowFrame[1], /…/);
 
     assert.ok(renders > 0);
@@ -283,6 +298,17 @@ test("pins live background subagents below the editor until they settle", async 
     releaseCleanup.resolve();
     await waitFor(() => widgetCalls.at(-1)?.value === undefined);
     assert.equal(widgetCalls.at(-1)?.value, undefined);
+    // The worktree run reports completed twice (before and after cleanup) but leaves one receipt.
+    await waitFor(() => receipts.length === 16);
+    assert.equal(new Set(receipts.map(({ data }) => data.id)).size, 16);
+    assert.ok(receipts.every(({ customType }) => customType === "piewf-subagent-receipt"));
+    const renderer = entryRenderers.get("piewf-subagent-receipt");
+    assert.ok(renderer);
+    const scoutReceipt = receipts.find(({ data }) => data.label === "scout").data;
+    assert.match(renderer({ data: scoutReceipt }, { expanded: false }, theme).render(80).join("\n"), /^✓ scout 3t · \$0\.00 · 00:0\d · completed$/);
+    const expandedReceipt = renderer({ data: scoutReceipt }, { expanded: true }, theme).render(80).join("\n");
+    assert.match(expandedReceipt, /in 1t · out 2t/);
+    assert.match(expandedReceipt, new RegExp(`run ${scoutReceipt.id}`));
   } finally {
     releaseCleanup.resolve();
     await handlers.get("session_shutdown")({}, context);
@@ -345,7 +371,7 @@ test("opens the /subagents dashboard and picker and inspects durable status with
         pickerOptions.push([...options]);
         return Promise.resolve(pickerOptions.length === 1 ? options[2] : "Close");
       },
-      notify() {},
+      notify: strictNotify(),
     },
   };
   const tuiContext = {
@@ -358,11 +384,13 @@ test("opens the /subagents dashboard and picker and inspects durable status with
         dashboards.push(component.render(120).join("\n"));
         component.handleInput("tui.select.down");
         component.handleInput("j");
-        await waitFor(() => component.render(120).join("\n").includes("Result"));
+        component.handleInput("a");
+        // The full inspection of the new selection brings its result, and with it the editor action.
+        await waitFor(() => component.render(120).join("\n").includes("Open result in editor"));
         dashboards.push(component.render(120).join("\n"));
         component.dispose();
       },
-      notify() {},
+      notify: strictNotify(),
     },
   };
   try {
@@ -382,7 +410,7 @@ test("opens the /subagents dashboard and picker and inspects durable status with
     assert.doesNotMatch(pickerOptions[0].join("\n"), /run-malformed/);
     assert.match(detailScreens[0], /Selected subagent: run-2/);
     assert.match(detailScreens[0], /Role: \(none\)/);
-    assert.match(detailScreens[0], /Result\ndone/);
+    assert.doesNotMatch(detailScreens[0], /Result|done/, "the prompt and result open in the editor, as in /workflow");
 
     await command.options.handler("", tuiContext);
     const [initial, selected] = dashboards;
@@ -393,7 +421,9 @@ test("opens the /subagents dashboard and picker and inspects durable status with
     assert.doesNotMatch(initial, /run-other|run-malformed/);
     assert.match(selected, /→ • run-2/);
     assert.match(selected, /Selected subagent: run-2/);
-    assert.match(selected, /\| done/);
+    assert.doesNotMatch(selected, /\| done/);
+    assert.match(selected, /Copy run path/);
+    assert.doesNotMatch(selected, /Delete/, "a manager without delete offers no deletion");
   } finally {
     await rm(cwd, { recursive: true, force: true });
   }
@@ -607,7 +637,7 @@ test("matches workflow agent detail fields and runs standalone registered and co
     accounting: { input: 1, output: 2, cacheRead: 3, cacheWrite: 4, cost: 0.5 },
   };
   const liveSession = { reference: attempt.session };
-  const prepared = { cwd, model: { provider: "fixture", model: "model" }, tools: ["read"], sessionLabel: "scout" };
+  const prepared = { cwd, model: { provider: "fixture", model: "model" }, tools: ["read"], sessionLabel: "scout", systemPrompt: "SYSTEM" };
   const handoff = { state: "local-running", transferred: false };
   const status = {
     id: "run-agent-actions",
@@ -617,7 +647,7 @@ test("matches workflow agent detail fields and runs standalone registered and co
     lastEventAt: Date.now() - 601_000,
     attempts: 2,
     attemptDetails: [attempt],
-    progress: { accounting: attempt.accounting, toolCalls: [{ id: "tool", name: "read", state: "completed" }], state: { model: { provider: "fixture", model: "model" }, tools: ["read"] }, activity: { kind: "tool", text: "read" }, lastEventAt: attempt.startedAt },
+    progress: { accounting: attempt.accounting, toolCalls: [{ id: "tool", name: "read", state: "completed" }], state: { model: { provider: "fixture", model: "model" }, tools: ["read"] }, activity: { kind: "tool", text: "read" }, lastEventAt: Date.now() - 601_000 },
     worktree: { path: join(cwd, "worktree"), branch: "subagent/run-agent-actions" },
   };
   let actionContext;
@@ -678,7 +708,8 @@ test("matches workflow agent detail fields and runs standalone registered and co
         assert.match(actionScreen, /Open system prompt in editor/);
         assert.match(actionScreen, /Steer/);
         assert.match(actionScreen, /Stop/);
-        assert.match(actionScreen, /Copy agent ID/);
+        assert.match(actionScreen, /Copy run path\n.*Copy agent ID/, "Copy run path sits before Copy agent ID, as in /workflow");
+        assert.doesNotMatch(actionScreen, /Delete/, "a running run cannot be deleted");
         component.handleInput("tui.select.confirm");
         await waitFor(() => actionContext !== undefined);
         assert.equal(actionContext.liveSession, liveSession);
@@ -686,16 +717,21 @@ test("matches workflow agent detail fields and runs standalone registered and co
         assert.equal(actionContext.handoff, handoff);
         assert.equal(actionContext.session.sessionId, "agent-session");
         await waitFor(() => !component.render(140).join("\n").includes("Agent actions"));
-        component.handleInput("a");
-        for (let index = 0; index < 7; index += 1) component.handleInput("tui.select.down");
-        component.handleInput("tui.select.confirm");
-        await waitFor(() => copied.length === 1);
-        assert.equal(copied[0], status.id);
-        await waitFor(() => !component.render(140).join("\n").includes("Agent actions"));
+        const copyAction = async (label) => {
+          component.handleInput("a");
+          for (let index = 0; index < 12 && !component.render(140).join("\n").includes(`→ ${label}`); index += 1) component.handleInput("tui.select.down");
+          const count = copied.length;
+          component.handleInput("tui.select.confirm");
+          await waitFor(() => copied.length === count + 1);
+          await waitFor(() => !component.render(140).join("\n").includes("Agent actions"));
+          return copied.at(-1);
+        };
+        assert.equal(await copyAction("Copy agent ID"), status.id);
+        assert.equal(await copyAction("Copy run path"), join(storageDir, status.id));
         component.handleInput("escape");
         return completed;
       },
-      notify() {},
+      notify: strictNotify(),
     },
   };
   try {
@@ -752,7 +788,7 @@ test("captures steering text inside the dashboard without nesting UI prompts", a
         return result;
       },
       async input() { throw new Error("nested input must not be used"); },
-      notify() {},
+      notify: strictNotify(),
     },
   };
   try {
@@ -764,7 +800,27 @@ test("captures steering text inside the dashboard without nesting UI prompts", a
   }
 });
 
-test("reports a failed reload after a dashboard action without blaming the action", async () => {
+function dashboardFixture(storageDir, manager) {
+  const commands = [];
+  registerSubagentsExtension({ registerTool() {}, registerCommand(name, options) { commands.push({ name, options }); } }, { manager, managerDependencies: { storageDir } });
+  const command = commands.find(({ name }) => name === "subagents");
+  assert.ok(command);
+  return command;
+}
+function openDashboard(factory, rows = 30) {
+  let finish;
+  const completed = new Promise((resolve) => { finish = resolve; });
+  const component = factory({ terminal: { rows }, requestRender() {} }, { fg: (_color, text) => text, bold: (text) => text }, { matches(data, binding) { return data === binding || data === "escape" && binding === "tui.select.cancel"; } }, (value) => finish(value));
+  return { component, completed, text: (width = 140) => component.render(width).join("\n") };
+}
+function chooseAction(component, label) {
+  component.handleInput("a");
+  for (let index = 0; index < 16 && !component.render(140).join("\n").includes(`→ ${label}`); index += 1) component.handleInput("tui.select.down");
+  assert.match(component.render(140).join("\n"), new RegExp(`→ ${label}`));
+  component.handleInput("tui.select.confirm");
+}
+
+test("confirms a dashboard stop and shows the fresh list when the selection cannot be re-read", async () => {
   const cwd = await mkdtemp(join(tmpdir(), "subagents-navigator-reload-failure-"));
   const storageDir = join(cwd, "storage");
   const id = "run-reload-failure";
@@ -773,34 +829,40 @@ test("reports a failed reload after a dashboard action without blaming the actio
   let stops = 0;
   const notices = [];
   const status = { id, sessionId: "session-1", state: "running", startedAt: 1 };
-  const manager = {
+  const command = dashboardFixture(storageDir, {
     async run() { throw new Error("unexpected run"); },
     async inspect(params) {
-      if (params.id) return { ...status, state: stops ? "stopped" : "running" };
-      if (stops) throw new Error("list unavailable");
-      return [status];
+      if (!params.id) return [{ ...status, state: stops ? "stopped" : "running" }];
+      if (stops) throw new Error("detail unavailable");
+      return status;
     },
     async steer() {},
     async stop() { stops += 1; return { ...status, state: "stopped" }; },
     async retry() {},
-  };
-  const commands = [];
-  registerSubagentsExtension({ registerTool() {}, registerCommand(name, options) { commands.push({ name, options }); } }, { manager, managerDependencies: { storageDir } });
-  const command = commands.find(({ name }) => name === "subagents");
-  assert.ok(command);
+  });
+  let afterStop = "";
+  let question = "";
   const context = {
     ...(await executionContext(cwd)),
     mode: "tui",
     hasUI: true,
     ui: {
+      async confirm() { throw new Error("Pi's confirm dialog would replace the dashboard"); },
       async custom(factory) {
-        let finish;
-        const completed = new Promise((resolve) => { finish = resolve; });
-        const component = factory({ terminal: { rows: 30 }, requestRender() {} }, { fg: (_color, text) => text, bold: (text) => text }, { matches(data, binding) { return data === binding || data === "escape" && binding === "tui.select.cancel"; } }, (value) => finish(value));
-        component.handleInput("a");
-        for (let index = 0; index < 10 && !component.render(140).join("\n").includes("→ Stop"); index += 1) component.handleInput("tui.select.down");
+        const { component, completed, text } = openDashboard(factory);
+        chooseAction(component, "Stop");
+        await waitFor(() => text().includes("Stop subagent?"));
+        question = text();
+        component.handleInput("tui.select.down");
         component.handleInput("tui.select.confirm");
-        await waitFor(() => !component.render(140).join("\n").includes("Agent actions"));
+        await waitFor(() => !text().includes("Stop subagent?"));
+        assert.equal(stops, 0, "declining the confirmation keeps the run");
+        // Declining leaves the menu on Stop, so confirming again once the first attempt settles asks again.
+        await waitFor(() => { if (!text().includes("Stop subagent?")) component.handleInput("tui.select.confirm"); return text().includes("Stop subagent?"); });
+        assert.match(text(), /→ Yes/);
+        component.handleInput("tui.select.confirm");
+        await waitFor(() => !text().includes("Agent actions"));
+        afterStop = text();
         component.handleInput("escape");
         return completed;
       },
@@ -810,9 +872,186 @@ test("reports a failed reload after a dashboard action without blaming the actio
   try {
     await command.options.handler("", context);
     assert.equal(stops, 1);
+    assert.match(question, new RegExp(`Stop subagent\\?\\nStop subagent stop-me \\(${id}\\)\\? This cannot be undone\\.\\n→ Yes\\n  No\\n`));
+    assert.match(afterStop, /• stop-me · ✗/, "the fresh list shows even though the selection could not be re-read");
     assert.match(notices.join("\n"), /Stopped subagent/);
-    assert.match(notices.join("\n"), /Cannot refresh subagents: list unavailable/);
+    assert.match(notices.join("\n"), /Cannot refresh subagents: detail unavailable/);
     assert.doesNotMatch(notices.join("\n"), /Cannot stop/);
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
+
+test("refreshes the action menu after a failed dashboard action", async () => {
+  // The refresh timer never fires here, so only the post-failure reload can update the menu.
+  const originalSetInterval = globalThis.setInterval;
+  const originalClearInterval = globalThis.clearInterval;
+  const fakeTimer = {};
+  globalThis.setInterval = (callback, delay, ...args) => delay === 1000 ? fakeTimer : originalSetInterval(callback, delay, ...args);
+  globalThis.clearInterval = (timer) => { if (timer !== fakeTimer) originalClearInterval(timer); };
+  const cwd = await mkdtemp(join(tmpdir(), "subagents-navigator-action-failure-"));
+  const storageDir = join(cwd, "storage");
+  const id = "run-action-failure";
+  await mkdir(join(storageDir, id), { recursive: true });
+  await writeFile(join(storageDir, id, "request.json"), JSON.stringify({ prompt: "settles", label: "settles", mode: "background" }));
+  let state = "running";
+  const notices = [];
+  const command = dashboardFixture(storageDir, {
+    async run() { throw new Error("unexpected run"); },
+    async inspect(params) { const status = { id, sessionId: "session-1", state, startedAt: 1, ...(state === "running" ? {} : { finishedAt: 2 }) }; return params.id ? status : [status]; },
+    async steer() {},
+    async stop() { throw new Error("unexpected stop"); },
+    async retry() {},
+  });
+  const context = {
+    ...(await executionContext(cwd)),
+    mode: "tui",
+    hasUI: true,
+    ui: {
+      async confirm() { throw new Error("an unavailable action must not ask"); },
+      async custom(factory) {
+        const { component, completed, text } = openDashboard(factory);
+        component.handleInput("a");
+        for (let index = 0; index < 16 && !text().includes("→ Stop"); index += 1) component.handleInput("tui.select.down");
+        state = "completed";
+        component.handleInput("tui.select.confirm");
+        await waitFor(() => notices.length === 1 && !text().includes("Stop"));
+        assert.match(text(), /Agent actions/, "the menu stays open on the fresh options");
+        assert.match(text(), /Delete|Copy agent ID/);
+        component.handleInput("escape");
+        component.handleInput("escape");
+        return completed;
+      },
+      notify(message) { notices.push(message); },
+    },
+  };
+  try {
+    await command.options.handler("", context);
+    assert.deepEqual(notices, ["Cannot stop: Action Stop is no longer available"]);
+  } finally {
+    globalThis.setInterval = originalSetInterval;
+    globalThis.clearInterval = originalClearInterval;
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
+
+test("a dashboard tick keeps the last known row of a run it cannot read", async () => {
+  const originalSetInterval = globalThis.setInterval;
+  const originalClearInterval = globalThis.clearInterval;
+  const ticks = [];
+  const fakeTimer = {};
+  globalThis.setInterval = (callback, delay, ...args) => { if (delay !== 1000) return originalSetInterval(callback, delay, ...args); ticks.push(callback); return fakeTimer; };
+  globalThis.clearInterval = (timer) => { if (timer !== fakeTimer) originalClearInterval(timer); };
+  const cwd = await mkdtemp(join(tmpdir(), "subagents-navigator-unreadable-"));
+  const storageDir = join(cwd, "storage");
+  const progress = (text) => ({ accounting: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0 }, toolCalls: [], activity: { kind: "tool", text } });
+  const readable = { id: "run-readable", sessionId: "session-1", state: "running", startedAt: 2, progress: progress("before") };
+  const unreadable = { id: "run-unreadable", sessionId: "session-1", state: "running", startedAt: 1 };
+  for (const status of [readable, unreadable]) {
+    await mkdir(join(storageDir, status.id), { recursive: true });
+    await writeFile(join(storageDir, status.id, "request.json"), JSON.stringify({ prompt: status.id, label: status.id, mode: "background" }));
+  }
+  let ticked = false;
+  const command = dashboardFixture(storageDir, {
+    async run() { throw new Error("unexpected run"); },
+    async inspect(params) {
+      if (!params.id) return [readable, unreadable];
+      if (params.id === unreadable.id) throw new Error("unreadable");
+      return ticked ? { ...readable, progress: progress("after") } : readable;
+    },
+    async steer() {},
+    async stop() {},
+    async retry() {},
+  });
+  const context = {
+    ...(await executionContext(cwd)),
+    mode: "tui",
+    hasUI: true,
+    ui: {
+      async custom(factory) {
+        const { component, text } = openDashboard(factory);
+        assert.match(text(), /→ • run-readable/);
+        assert.match(text(), /Activity: before/);
+        assert.equal(ticks.length, 1);
+        ticked = true;
+        ticks[0]();
+        await waitFor(() => text().includes("Activity: after"));
+        assert.match(text(), /• run-unreadable · \S/, "the unreadable run keeps its last known row");
+        assert.match(text(), /auto-refresh 1s/);
+        component.dispose();
+      },
+      notify: strictNotify(),
+    },
+  };
+  try {
+    await command.options.handler("", context);
+  } finally {
+    globalThis.setInterval = originalSetInterval;
+    globalThis.clearInterval = originalClearInterval;
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
+
+test("deletes a settled run and the settled runs of one state from the dashboard", async () => {
+  const cwd = await mkdtemp(join(tmpdir(), "subagents-navigator-delete-"));
+  const storageDir = join(cwd, "storage");
+  const statuses = [
+    { id: "run-failed", sessionId: "session-1", state: "failed", startedAt: 1, finishedAt: 30, error: { code: "AGENT_FAILED", message: "boom" } },
+    { id: "run-done-a", sessionId: "session-1", state: "completed", startedAt: 1, finishedAt: 20 },
+    { id: "run-done-b", sessionId: "session-1", state: "completed", startedAt: 1, finishedAt: 10 },
+  ];
+  for (const status of statuses) {
+    await mkdir(join(storageDir, status.id), { recursive: true });
+    await writeFile(join(storageDir, status.id, "request.json"), JSON.stringify({ prompt: status.id, label: status.id, mode: "background" }));
+  }
+  const deleted = [];
+  const questions = [];
+  const notices = [];
+  const live = () => statuses.filter((status) => !deleted.includes(status.id));
+  const command = dashboardFixture(storageDir, {
+    async run() { throw new Error("unexpected run"); },
+    async inspect(params) { return params.id ? live().find((status) => status.id === params.id) ?? Promise.reject(new Error("gone")) : live(); },
+    async steer() {},
+    async stop() {},
+    async retry() {},
+    async delete(request) { deleted.push(request.id); return { id: request.id, deleted: true }; },
+  });
+  let closed = false;
+  const context = {
+    ...(await executionContext(cwd)),
+    mode: "tui",
+    hasUI: true,
+    ui: {
+      async confirm() { throw new Error("Pi's confirm dialog would replace the dashboard"); },
+      async custom(factory) {
+        const { component, completed, text } = openDashboard(factory);
+        void completed.then(() => { closed = true; });
+        const accept = async (title) => {
+          await waitFor(() => text().includes(title));
+          questions.push(text().split("\n").slice(-5, -3).join("\n"));
+          component.handleInput("tui.select.confirm");
+        };
+        assert.match(text(), /→ • run-failed/);
+        component.handleInput("a");
+        assert.match(text(), /Delete\n.*Delete all completed\n.*Delete all failed\n.*Copy run path/);
+        component.handleInput("escape");
+        chooseAction(component, "Delete");
+        await accept("Delete subagent?");
+        await waitFor(() => deleted.length === 1 && text().includes("→ • run-done-a"));
+        assert.doesNotMatch(text(), /run-failed|Delete all failed/);
+        chooseAction(component, "Delete all completed");
+        await accept("Delete completed runs?");
+        await waitFor(() => closed);
+        return completed;
+      },
+      notify(message) { notices.push(message); },
+    },
+  };
+  try {
+    await command.options.handler("", context);
+    assert.deepEqual(deleted, ["run-failed", "run-done-a", "run-done-b"]);
+    assert.deepEqual(questions, ["Delete subagent?\nDelete run-failed (run-failed) and its record? This cannot be undone.", "Delete completed runs?\nDelete all completed subagent runs and their records? This cannot be undone."]);
+    assert.deepEqual(notices, ["Deleted subagent run-failed.", "Deleted 2 completed subagent run(s).", "No durable subagent runs in this session."]);
   } finally {
     await rm(cwd, { recursive: true, force: true });
   }
@@ -912,7 +1151,8 @@ test("bounds every narrow dashboard row while drilling from the list to details,
         for (let index = 0; index < 60; index += 1) component.handleInput("tui.select.down");
         const detailBottom = component.render(width);
         assertNarrowRows(detailBottom);
-        assert.equal(detailBottom.some((row) => row.includes("detail-39")), true);
+        assert.equal(detailBottom.some((row) => row === "actions"), true, "scrolling reaches the hint that ends the details");
+        assert.equal(detailBottom.some((row) => row.includes("detail-")), false, "the prompt opens in the editor instead");
         for (let index = 0; index < 3; index += 1) component.handleInput("tui.select.up");
         assert.notDeepEqual(component.render(width), detailBottom);
         component.handleInput("a");
@@ -959,6 +1199,7 @@ test("runs navigator steer, stop, and non-blocking retry actions with state reva
   const steers = [];
   const retryContexts = [];
   const selectedOptions = [];
+  const confirms = [];
   const manager = {
     async run() { throw new Error("unexpected run"); },
     async inspect(params) {
@@ -990,13 +1231,15 @@ test("runs navigator steer, stop, and non-blocking retry actions with state reva
         return "Retry";
       },
       async input() { return "continue with the checklist"; },
-      notify() {},
+      async confirm(title) { confirms.push(title); return confirms.length > 1; },
+      notify: strictNotify(),
     },
   };
   try {
     await command.options.handler("", context);
     assert.deepEqual(steers, ["continue with the checklist"]);
     assert.equal(state, "stopped");
+    assert.deepEqual(confirms, ["Stop subagent?", "Stop subagent?"], "a declined stop asks again the next time");
     assert.equal(retryContexts.length, 1);
     assert.equal(retryContexts[0].waitForForeground, false);
     assert.equal(selectedOptions.some((options) => options.includes("Steer") && options.includes("Stop") && !options.includes("Retry")), true);
@@ -2528,7 +2771,32 @@ test("preserves completed results when persisted worktree cleanup fails", async 
     assert.deepEqual(JSON.parse(await readFile(join(storageDir, id, "status.json"), "utf8")), status);
     assert.deepEqual(JSON.parse(await readFile(join(storageDir, id, "result.json"), "utf8")), value);
     await assert.rejects(stat(join(storageDir, id, "failure.json")));
+    await assert.rejects(manager.delete({ id }, context), (error) => error.code === "WORKTREE_FAILED", "deleting would lose the cleanup context");
+    assert.deepEqual(JSON.parse(await readFile(join(storageDir, id, "status.json"), "utf8")), status);
   } finally {
+    await manager.dispose();
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
+
+test("deletes settled subagent records and refuses running ones", async () => {
+  const cwd = await mkdtemp(join(tmpdir(), "subagents-delete-"));
+  const storageDir = join(cwd, "subagents-storage");
+  const pending = deferred();
+  let executions = 0;
+  const manager = createSubagentManager({ storageDir, createExecutor() { return { async execute() { executions += 1; return executions === 1 ? { value: "done", attempts: [], cwd } : pending.promise; } }; } });
+  const context = await managerContext(cwd);
+  try {
+    const done = await manager.run({ prompt: "finish", mode: "background" }, context);
+    await waitFor(async () => (await manager.inspect({ id: done.id }, context)).state === "completed");
+    const running = await manager.run({ prompt: "keep going", mode: "background" }, context);
+    await assert.rejects(manager.delete({ id: running.id }, context), (error) => error.code === "RUN_OWNED");
+    assert.deepEqual(await manager.delete({ id: done.id }, context), { id: done.id, deleted: true });
+    await assert.rejects(stat(join(storageDir, done.id)));
+    await assert.rejects(manager.inspect({ id: done.id }, context), (error) => error.code === "RUN_NOT_FOUND");
+    assert.deepEqual((await manager.inspect({}, context)).map(({ id }) => id), [running.id]);
+  } finally {
+    pending.resolve({ value: "cleanup", attempts: [], cwd });
     await manager.dispose();
     await rm(cwd, { recursive: true, force: true });
   }

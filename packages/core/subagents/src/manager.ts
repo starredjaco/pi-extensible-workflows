@@ -1159,6 +1159,20 @@ class PersistentSubagentManager implements SubagentManager {
     return publicStatus(persistedStatus(run));
   }
 
+  /** Removes a settled record for the /subagents navigator, as /workflow deletes a terminal run; not a model tool. */
+  async delete(request: Readonly<{ id: string }>): Promise<unknown> {
+    const id = checkedId(request);
+    await this.ensureInitialized();
+    const root = storageDirectory(this.dependencies);
+    const status = this.activeRuns.has(id) ? undefined : this.terminalSummaries.get(id) ?? await loadPersistedStatus(root, id, false);
+    if (status === undefined || status.state === "running") throw new WorkflowError("RUN_OWNED", `Stop subagent ${id} before deleting it`);
+    // Retained worktree metadata means cleanup failed, and the record holds what a later cleanup needs.
+    if (status.worktree !== undefined) throw new WorkflowError("WORKTREE_FAILED", `Subagent ${id} still has a worktree to clean up`);
+    await rm(runDirectory(root, id), { recursive: true, force: true });
+    this.terminalSummaries.delete(id);
+    return { id, deleted: true };
+  }
+
   async dispose(): Promise<void> {
     if (this.disposePromise) return this.disposePromise;
     this.disposePromise = (async () => {
@@ -1547,14 +1561,15 @@ export function createUnavailableSubagentManager(): SubagentManager {
   };
 }
 export function createSubagentManager(dependencies: SubagentManagerDependencies = {}): SubagentManager {
-  const manager: SubagentManager = new PersistentSubagentManager(dependencies);
+  const manager = new PersistentSubagentManager(dependencies);
   return {
     run: (request, context) => manager.run(request, context),
     inspect: (request, context) => manager.inspect(request, context),
-    getAttemptActionData: (id) => manager.getAttemptActionData?.(id),
-    steer: (request, context) => manager.steer(request, context),
-    stop: (request, context) => manager.stop(request, context),
+    getAttemptActionData: (id) => manager.getAttemptActionData(id),
+    steer: (request) => manager.steer(request),
+    stop: (request) => manager.stop(request),
     retry: (request, context) => manager.retry(request, context),
-    dispose: async () => { await manager.dispose?.(); },
+    delete: (request) => manager.delete(request),
+    dispose: async () => { await manager.dispose(); },
   };
 }

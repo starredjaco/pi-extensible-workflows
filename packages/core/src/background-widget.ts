@@ -78,7 +78,7 @@ const MAX_ROWS = 10;
  * of thinking and far shorter than the ten minutes it takes to be declared
  * stalled.
  */
-const QUIET_MS = 3 * 60 * 1000;
+export const QUIET_MS = 3 * 60 * 1000;
 
 /** The core's own threshold for calling an agent stalled outright. */
 const STALL_MS = WORKFLOW_AGENT_STALL_THRESHOLD_MS;
@@ -144,7 +144,7 @@ const RESET = "\x1b[0m";
  * Paints text in a themed colour role. Falls back to the bare text when no
  * theme is available, so a frame rendered outside the TUI is still legible.
  */
-type Paint = (role: Parameters<Theme["fg"]>[0], text: string) => string;
+export type Paint = (role: Parameters<Theme["fg"]>[0], text: string) => string;
 
 /**
  * States that mean work is still happening, derived from the core's own lists
@@ -223,14 +223,14 @@ function spinner(now: number): string {
 }
 
 /** Status mark for a finished-or-running unit of work. */
-function mark(state: string | undefined, now: number, paint: Paint, runState?: string): string {
+export function mark(state: string | undefined, now: number, paint: Paint, runState?: string): string {
   if (state === "running" && (runState === undefined || runState === "running")) return paint(ROLE.live, spinner(now));
   if (state === "completed") return paint(ROLE.done, "✓");
   if (state === "failed" || state === "budget_exhausted") return paint(ROLE.failed, "✗");
   return paint(ROLE.quiet, "·");
 }
 
-function formatElapsed(ms: number): string {
+export function formatElapsed(ms: number): string {
   const total = Math.max(0, Math.floor(ms / 1000));
   const minutes = Math.floor(total / 60);
   const seconds = total % 60;
@@ -727,15 +727,6 @@ function renderFrame(runs: readonly Run[], now: number, width: number, offset = 
   sizeOut.rows = rows.length;
   const body = collapse(rows, MAX_ROWS - 2, paint, offset, scrolling);
 
-  // Width budget: the rule takes a column and a space on each side, so the
-  // text has four fewer than the widget is given. Every piece is measured
-  // against `inner` so the right-hand rule lands in one column on every row.
-  const inner = Math.max(20, width - 4);
-
-
-  // Side rules below the lid, and no floor: the box opens downward into the
-  // editor rather than closing on itself, which is one more line kept for the
-  // run.
   // A scrollbar on the right rule, drawn only when there is more tree than
   // frame. Without it the window's position is a guess: three rows of a
   // twenty-row tree look the same near the top as near the bottom.
@@ -763,6 +754,27 @@ function renderFrame(runs: readonly Run[], now: number, width: number, offset = 
     return index >= top && index < top + size ? "█" : "░";
   };
 
+  // Only advertise navigation when it can reveal hidden rows: a hint for keys
+  // that do nothing is worse than no hint.
+  const hint = !__navigationForTests.enabled || maxOffset(total, MAX_ROWS - 2) === 0
+    ? ""
+    : scrolling ? "↑/↓ to scroll · Esc to exit" : "Alt+O to scroll";
+  return drawFrame(title, hint, body, width, paint, accent, scrollbar);
+}
+
+/**
+ * The box around the live rows, shared with the subagent widget so both sit
+ * under the editor in one style.
+ */
+export function drawFrame(title: string, hint: string, body: readonly Pick<Row, "text" | "right">[], width: number, paint: Paint, accent: (text: string) => string, scrollbar: (index: number) => string | undefined = () => undefined): string[] {
+  // Width budget: the rule takes a column and a space on each side, so the
+  // text has four fewer than the widget is given. Every piece is measured
+  // against `inner` so the right-hand rule lands in one column on every row.
+  const inner = Math.max(20, width - 4);
+
+  // Side rules below the lid, and no floor: the box opens downward into the
+  // editor rather than closing on itself, which is one more line kept for the
+  // run.
   const lines = body.map((row, index) => {
     // The numbers hold the right edge; the name gives way when the two would
     // meet. A truncated workflow name is still recognisable, where a truncated
@@ -784,11 +796,6 @@ function renderFrame(runs: readonly Run[], now: number, width: number, offset = 
   // rather than sitting under a separate run of dashes. In ten rows a line
   // spent on decoration is a line not spent on the run, and the box still
   // reads as closed at the top.
-  // Only advertise navigation when it can reveal hidden rows: a hint for keys
-  // that do nothing is worse than no hint.
-  const hint = !__navigationForTests.enabled || maxOffset(total, MAX_ROWS - 2) === 0
-    ? ""
-    : scrolling ? "↑/↓ to scroll · Esc to exit" : "Alt+O to scroll";
   const label = ` ${title} `;
   const tail = hint === "" ? "" : ` ${hint} `;
   const spare = inner + 2 - visibleLength(label) - visibleLength(tail);

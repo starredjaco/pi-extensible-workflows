@@ -1,6 +1,6 @@
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
-import { copyToClipboard, getAgentDir, SettingsManager, type ExtensionAPI, type ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
+import { copyToClipboard, getAgentDir, SettingsManager, truncateToVisualLines, type ExtensionAPI, type ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import { Editor, truncateToWidth, type EditorTheme } from "@earendil-works/pi-tui";
 import { agentActionLabels, deepFreeze, errorText, formatAgentDetail, formatAgentError, formatCost, formatNavigatorColumns, formatWorkflowRuntime, jsonValue, loadingRegistry, navigatorAttentionSortByState, openWorkflowArtifact, PLAIN_WORKFLOW_PROGRESS_STYLES, progressStyleForState, runStateGlyph, themeWorkflowProgressStyles, visibleStandaloneAgentAttemptActions, workflowKeyLabel, workflowKeyMatches, workflowPromptArtifact, workflowResultArtifact, type AgentAttemptSummary, type AgentDetailPresentation, type StandaloneAgentAttemptActionContext, type WorkflowArtifact, type WorkflowProgressStyles } from "../../src/index.js";
 import { normalizeSubagentRunRequest, type SubagentManager, type SubagentManagerContext, type SubagentProgress, type SubagentRunRequest, type SubagentStatus } from "./contracts.js";
@@ -98,8 +98,6 @@ function boundedText(value: unknown, limit = MAX_DETAIL_TEXT): string {
   const text = typeof value === "string" ? value : (() => { try { const serialized: unknown = JSON.stringify(value, null, 2); return typeof serialized === "string" ? serialized : String(value); } catch { return String(value); } })();
   return text.length > limit ? `${text.slice(0, limit)}…` : text;
 }
-// sv-SE renders local time as YYYY-MM-DD HH:MM:SS.
-function localTime(value: number | undefined): string | undefined { return value !== undefined && Number.isFinite(value) ? new Date(value).toLocaleString("sv-SE") : undefined; }
 
 function latestAttempt(status: SubagentStatus): AgentAttemptSummary | undefined {
   return [...(status.attemptDetails ?? [])].sort((left, right) => right.attempt - left.attempt)[0];
@@ -133,27 +131,20 @@ function detailPresentation(inspection: Inspection): AgentDetailPresentation {
     ...(error === undefined ? {} : { error: { code: boundedText(error.code, 256), message: boundedText(error.message) } }),
   };
 }
-/** Details of the selected run; `actions` sit between its fields and the long prompt and result sections. */
-function detailRows(inspection: Inspection, styles: WorkflowProgressStyles, actions: readonly string[] = []): string[] {
-  const { entry, record } = inspection;
-  const { status, request } = entry;
+type DetailMenu = "hint" | { readonly options: readonly string[]; readonly index: number } | undefined;
+/** Details of the selected run in the order of a /workflow agent: fields, hint, error, then the action menu. The prompt and result open in the editor. */
+function detailRows(inspection: Inspection, styles: WorkflowProgressStyles, menu?: DetailMenu): string[] {
+  const { entry } = inspection;
   const presentation = detailPresentation(inspection);
-  const startedAt = localTime(status.startedAt);
-  const finishedAt = localTime(status.finishedAt);
-  const lines = [
+  return [
     styles.bold(`Selected subagent: ${entryName(entry)}`),
-    `ID: ${boundedText(status.id, 256)}`,
-    ...formatAgentDetail(presentation, styles, status.finishedAt ?? Date.now(), { includeError: false }),
-    ...(startedAt === undefined ? [] : [`Started: ${startedAt}`]),
-    ...(finishedAt === undefined ? [] : [`Finished: ${finishedAt}`]),
-    ...(status.worktree === undefined ? [] : [`Worktree: ${boundedText(status.worktree.path)} (${boundedText(status.worktree.branch)})`]),
+    `ID: ${boundedText(entry.status.id, 256)}`,
+    ...formatAgentDetail(presentation, styles, entry.status.finishedAt ?? Date.now(), { includeError: false }),
     ...(entry.requestError === undefined ? [] : [styles.warning(`Request unavailable: ${boundedText(entry.requestError)}`)]),
+    ...(menu === "hint" ? [styles.muted("enter agent actions")] : []),
     ...(presentation.error === undefined ? [] : [formatAgentError(presentation.error, styles)]),
-    ...actions,
+    ...(typeof menu === "object" ? [styles.bold("Agent actions"), ...menu.options.map((option, index) => index === menu.index ? `→ ${styles.accent(option)}` : `  ${option}`)] : []),
   ];
-  if (request?.prompt) lines.push(styles.bold("Prompt"), boundedText(request.prompt));
-  if (Object.prototype.hasOwnProperty.call(record, "value")) lines.push(styles.bold("Result"), boundedText(record.value));
-  return lines;
 }
 function listRows(entries: readonly NavigatorEntry[], selectedId: string, styles: WorkflowProgressStyles): string[] {
   return [styles.bold("Runs"), ...entries.map((entry) => `${entry.status.id === selectedId ? "→" : " "} • ${entryName(entry)} · ${progressStyleForState(entry.status.state, styles)(runStateGlyph(entry.status.state, "⠦"))}`)];
@@ -210,11 +201,19 @@ function standaloneActionContext(manager: SubagentManager, inspection: Inspectio
 function liveSystemPrompt(manager: SubagentManager, status: SubagentStatus): string | undefined {
   return manager.getAttemptActionData?.(status.id)?.prepared?.systemPrompt;
 }
-function actionOptions(manager: SubagentManager, inspection: Inspection, context: ExtensionCommandContext): string[] {
+type BulkDeleteState = "completed" | "failed";
+const BULK_DELETE: Readonly<Record<string, BulkDeleteState>> = { "Delete all completed": "completed", "Delete all failed": "failed" };
+/** The /workflow picker's bulk deletions, offered for the states present in the list. */
+function bulkDeleteLabels(manager: SubagentManager, entries: readonly NavigatorEntry[]): string[] {
+  if (manager.delete === undefined) return [];
+  return Object.entries(BULK_DELETE).filter(([, state]) => entries.some((entry) => entry.status.state === state)).map(([label]) => label);
+}
+/** Agent actions plus the /workflow run actions that apply to a standalone run: Delete and Copy run path, before Copy agent ID. */
+function actionOptions(manager: SubagentManager, inspection: Inspection, context: ExtensionCommandContext, bulk: readonly string[] = []): string[] {
   const actionContext = standaloneActionContext(manager, inspection, context);
   const extensionLabels = actionContext === undefined ? [] : visibleStandaloneAgentAttemptActions(loadingRegistry().agentAttemptActions(), actionContext).map(([, action]) => action.label);
   const value = inspection.record.value;
-  return agentActionLabels({
+  const labels = agentActionLabels({
     extensionLabels,
     hasWorktree: inspection.entry.status.worktree !== undefined,
     openPrompt: context.mode === "tui" && inspection.entry.request?.prompt !== undefined,
@@ -222,6 +221,27 @@ function actionOptions(manager: SubagentManager, inspection: Inspection, context
     openResult: context.mode === "tui" && Object.prototype.hasOwnProperty.call(inspection.record, "value") && jsonValue(value),
     standaloneState: inspection.entry.status.state,
   });
+  const runActions = [...(manager.delete !== undefined && inspection.entry.status.state !== "running" ? ["Delete"] : []), ...bulk, ...(context.mode === "tui" ? ["Copy run path"] : [])];
+  labels.splice(labels.indexOf("Copy agent ID"), 0, ...runActions);
+  return labels;
+}
+type Confirm = (title: string, message: string) => Promise<boolean>;
+async function deleteAll(manager: SubagentManager, storageDirectory: string, context: ExtensionCommandContext, state: BulkDeleteState, confirm: Confirm): Promise<boolean> {
+  if (!await confirm(`Delete ${state} runs?`, `Delete all ${state} subagent runs and their records? This cannot be undone.`)) return false;
+  const skipped: string[] = [];
+  let deleted = 0;
+  for (const entry of await loadEntries(manager, storageDirectory, context)) {
+    if (entry.status.state !== state) continue;
+    try {
+      await manager.delete?.({ id: entry.status.id }, managerContext(context));
+      deleted += 1;
+    } catch (error) {
+      skipped.push(`${entry.status.id} (${errorText(error)})`);
+    }
+  }
+  if (skipped.length) context.ui.notify(`Skipped ${state} runs: ${skipped.join(", ")}.`, "warning");
+  if (deleted) context.ui.notify(`Deleted ${String(deleted)} ${state} subagent run(s).`, "info");
+  return true;
 }
 function retryResult(value: unknown): { readonly id: string; readonly state: "running" } | undefined {
   const record = objectValue(value);
@@ -239,7 +259,9 @@ async function steerSubagent(manager: SubagentManager, storageDirectory: string,
   await manager.steer({ id: entry.status.id, message }, managerContext(context));
   context.ui.notify(`Steered subagent ${entry.status.id}.`, "info");
 }
-async function performAction(manager: SubagentManager, storageDirectory: string, entry: NavigatorEntry, action: string, context: ExtensionCommandContext, tui: NavigatorTui | undefined, clipboard: (value: string) => Promise<void>): Promise<"stay" | { readonly retryId: string }> {
+/** `cancelled` means the user declined, so the menu stays where it was. */
+type ActionOutcome = "stay" | "cancelled" | "deleted" | { readonly retryId: string };
+async function performAction(manager: SubagentManager, storageDirectory: string, entry: NavigatorEntry, action: string, context: ExtensionCommandContext, tui: NavigatorTui | undefined, clipboard: (value: string) => Promise<void>, confirm: Confirm): Promise<ActionOutcome> {
   const fresh = await inspectEntry(manager, storageDirectory, entry, context);
   const available = actionOptions(manager, fresh, context);
   if (!available.includes(action)) throw new Error(`Action ${action} is no longer available`);
@@ -251,6 +273,13 @@ async function performAction(manager: SubagentManager, storageDirectory: string,
     return "stay";
   }
   if (action === "Copy agent ID") { await clipboard(fresh.entry.status.id); context.ui.notify("Copied agent ID.", "info"); return "stay"; }
+  if (action === "Copy run path") { await clipboard(join(storageDirectory, fresh.entry.status.id)); context.ui.notify("Copied run path.", "info"); return "stay"; }
+  if (action === "Delete" && manager.delete !== undefined) {
+    if (!await confirm("Delete subagent?", `Delete ${entryName(fresh.entry)} (${fresh.entry.status.id}) and its record? This cannot be undone.`)) return "cancelled";
+    await manager.delete({ id: fresh.entry.status.id }, managerContext(context));
+    context.ui.notify(`Deleted subagent ${fresh.entry.status.id}.`, "info");
+    return "deleted";
+  }
   if (action === "Copy branch" && fresh.entry.status.worktree) { await clipboard(fresh.entry.status.worktree.branch); context.ui.notify("Copied branch.", "info"); return "stay"; }
   if (action === "Copy worktree path" && fresh.entry.status.worktree) { await clipboard(fresh.entry.status.worktree.path); context.ui.notify("Copied worktree path.", "info"); return "stay"; }
   if (action === "Open prompt in editor" && tui && fresh.entry.request?.prompt !== undefined) { await openNavigatorArtifact(context, tui, workflowPromptArtifact(fresh.entry.request.prompt), "agent prompt"); return "stay"; }
@@ -258,11 +287,12 @@ async function performAction(manager: SubagentManager, storageDirectory: string,
   if (action === "Open result in editor" && tui && Object.prototype.hasOwnProperty.call(fresh.record, "value") && jsonValue(fresh.record.value)) { await openNavigatorArtifact(context, tui, workflowResultArtifact(fresh.record.value), "agent result"); return "stay"; }
   if (action === "Steer") {
     const message = await context.ui.input("Steer subagent", "Message for the running subagent");
-    if (message === undefined) return "stay";
+    if (message === undefined) return "cancelled";
     await steerSubagent(manager, storageDirectory, entry, context, message);
     return "stay";
   }
   if (action === "Stop") {
+    if (!await confirm("Stop subagent?", `Stop subagent ${entryName(fresh.entry)} (${fresh.entry.status.id})? This cannot be undone.`)) return "cancelled";
     const current = await inspectEntry(manager, storageDirectory, entry, context);
     if (current.entry.status.state !== "running") throw new Error(`Subagent ${entry.status.id} is no longer running`);
     await manager.stop({ id: entry.status.id }, managerContext(context));
@@ -285,7 +315,8 @@ async function showDetail(manager: SubagentManager, storageDirectory: string, en
     const action = await context.ui.select(detailRows(inspection, PLAIN_WORKFLOW_PROGRESS_STYLES).join("\n"), actionOptions(manager, inspection, context));
     if (!action || action === "Back") return;
     try {
-      if (await performAction(manager, storageDirectory, entry, action, context, undefined, clipboard) !== "stay") return;
+      const outcome = await performAction(manager, storageDirectory, entry, action, context, undefined, clipboard, (title, message) => context.ui.confirm(title, message));
+      if (outcome === "deleted" || typeof outcome === "object") return;
       inspection = await inspectEntry(manager, storageDirectory, entry, context);
     } catch (error) {
       context.ui.notify(`Cannot ${action.toLowerCase()}: ${errorText(error)}`, "warning");
@@ -323,6 +354,17 @@ async function showDashboard(manager: SubagentManager, storageDirectory: string,
     let actionMode = false;
     let actionIndex = 0;
     let steerMode = false;
+    // Pi's confirm dialog replaces this component and restores the editor, not the dashboard, so confirmations render in place.
+    let confirmation: { readonly title: string; readonly message: string; yes: boolean; readonly resolve: (value: boolean) => void } | undefined;
+    const confirmInline: Confirm = (title, message) => new Promise((resolve) => {
+      confirmation = { title, message, yes: true, resolve };
+      requestRender();
+    });
+    const answer = (value: boolean): void => {
+      const pending = confirmation;
+      confirmation = undefined;
+      pending?.resolve(value);
+    };
     let actionRunning = false;
     let refreshing = false;
     let disposed = false;
@@ -333,7 +375,7 @@ async function showDashboard(manager: SubagentManager, storageDirectory: string,
     const keyLabel = (binding: string, fallback: string): string => workflowKeyLabel(keybindings, binding, fallback);
     const matches = (data: string, binding: string): boolean => workflowKeyMatches(keybindings, data, binding);
     const requestRender = (): void => { if (!disposed) tui.requestRender(); };
-    const options = (): string[] => actionOptions(manager, inspection, context);
+    const options = (): string[] => actionOptions(manager, inspection, context, bulkDeleteLabels(manager, entries));
     const warn = (message: string): void => {
       if (disposed) return;
       try { context.ui.notify(message, "warning"); } catch { /* The session UI may already be closing. */ }
@@ -368,24 +410,37 @@ async function showDashboard(manager: SubagentManager, storageDirectory: string,
     const reload = async (id = inspection.entry.status.id): Promise<void> => {
       const current = ++generation;
       const nextEntries = await loadEntries(manager, storageDirectory, context);
+      if (current !== generation) return;
       const selected = nextEntries.find((entry) => entry.status.id === id) ?? nextEntries[0];
-      if (selected === undefined) return;
-      const next = await inspectEntry(manager, storageDirectory, selected, context);
+      if (selected === undefined) {
+        context.ui.notify("No durable subagent runs in this session.", "info");
+        close(undefined);
+        return;
+      }
+      let next: Inspection;
+      try { next = await inspectEntry(manager, storageDirectory, selected, context); }
+      catch (error: unknown) {
+        // The fresh list still shows, with the row's own data as when moving the selection.
+        if (current === generation) apply(nextEntries, { entry: selected, record: {} });
+        throw error;
+      }
       if (current === generation) apply(nextEntries, next);
     };
     // A tick re-reads only the active runs and the selection; the full list is read on open and after an action.
+    // A failed read keeps the last known row, as the /workflow refresh does, so one unreadable run cannot hold back the rest.
+    // Moving the selection bumps the generation, so a tick that survives it still has the selection it read.
+    //NOTE: a running run whose files vanish keeps the timer alive until the dashboard closes.
     const refresh = async (): Promise<void> => {
       if (disposed || actionRunning || refreshing) return;
       refreshing = true;
+      const current = generation;
+      const selectedId = inspection.entry.status.id;
       try {
-        const current = ++generation;
-        const selectedId = inspection.entry.status.id;
         const stale = entries.filter((entry) => entry.status.state === "running" || entry.status.id === selectedId);
-        const fresh = new Map((await Promise.all(stale.map((entry) => inspectEntry(manager, storageDirectory, entry, context)))).map((next) => [next.entry.status.id, next]));
-        const next = fresh.get(selectedId);
-        if (current === generation && next !== undefined) apply(attentionSort(entries.map((entry) => fresh.get(entry.status.id)?.entry ?? entry)), next);
-      } catch (error: unknown) {
-        warn(`Cannot refresh subagents: ${errorText(error)}`);
+        const results = await Promise.allSettled(stale.map((entry) => inspectEntry(manager, storageDirectory, entry, context)));
+        if (current !== generation) return;
+        const fresh = new Map(results.flatMap((result) => result.status === "fulfilled" ? [[result.value.entry.status.id, result.value] as const] : []));
+        apply(attentionSort(entries.map((entry) => fresh.get(entry.status.id)?.entry ?? entry)), fresh.get(selectedId) ?? inspection);
       } finally {
         refreshing = false;
       }
@@ -407,6 +462,7 @@ async function showDashboard(manager: SubagentManager, storageDirectory: string,
       disposed = true;
       generation += 1;
       stopTimer();
+      answer(false);
     };
     const close = (value: DashboardResult): void => {
       if (disposed) return;
@@ -417,19 +473,28 @@ async function showDashboard(manager: SubagentManager, storageDirectory: string,
       const message = value.trim();
       if (message) close({ entry: inspection.entry, message });
     };
+    const reloadAfterAction = async (id?: string): Promise<void> => {
+      try { await reload(id); }
+      catch (error: unknown) { warn(`Cannot refresh subagents: ${errorText(error)}`); }
+    };
     const runAction = (action: string): void => {
       actionRunning = true;
       requestRender();
-      void performAction(manager, storageDirectory, inspection.entry, action, context, tui, clipboard).then(async (outcome) => {
-        if (disposed) return;
+      const bulk = BULK_DELETE[action];
+      const pending = bulk === undefined ? performAction(manager, storageDirectory, inspection.entry, action, context, tui, clipboard, confirmInline) : deleteAll(manager, storageDirectory, context, bulk, confirmInline).then((done): ActionOutcome => done ? "stay" : "cancelled");
+      void pending.then(async (outcome) => {
+        if (disposed || outcome === "cancelled") return;
         // The action already happened: a failed reload must not read as a failed action that invites a second retry.
-        try { await reload(outcome === "stay" ? undefined : outcome.retryId); }
-        catch (error: unknown) { warn(`Cannot refresh subagents: ${errorText(error)}`); }
+        await reloadAfterAction(typeof outcome === "object" ? outcome.retryId : undefined);
         actionMode = false;
         actionIndex = 0;
         offset = 0;
         selectionNeedsScroll = true;
-      }, (error: unknown) => { warn(`Cannot ${action.toLowerCase()}: ${errorText(error)}`); }).finally(() => {
+      }, async (error: unknown) => {
+        warn(`Cannot ${action.toLowerCase()}: ${errorText(error)}`);
+        // The menu stays open on fresh options: a failed Stop usually means the run has already settled.
+        if (!disposed) await reloadAfterAction();
+      }).finally(() => {
         actionRunning = false;
         requestRender();
       });
@@ -441,10 +506,12 @@ async function showDashboard(manager: SubagentManager, storageDirectory: string,
         renderedWidth = width;
         const narrow = width < 80;
         const actions = actionMode ? options() : [];
-        const actionRows = actionMode ? [styles.bold("Agent actions"), ...actions.map((option, index) => index === actionIndex ? `→ ${styles.accent(option)}` : `  ${option}`)] : steerMode ? [] : [styles.muted("enter agent actions")];
+        const menu: DetailMenu = actionMode ? { options: actions, index: actionIndex } : steerMode ? undefined : "hint";
         const layout = narrow ? detailsMode || actionMode || steerMode ? { detailsOnly: true } : { treeOnly: true } : {};
-        const content = [...headerRows(entries, styles), ...formatNavigatorColumns(listRows(entries, inspection.entry.status.id, styles), detailRows(inspection, styles, actionRows), width, layout)];
-        const footer = steerMode ? [styles.bold("Steer subagent"), ...steerEditor.render(width)] : [];
+        const content = [...headerRows(entries, styles), ...formatNavigatorColumns(listRows(entries, inspection.entry.status.id, styles), detailRows(inspection, styles, menu), width, layout)];
+        const footer = steerMode ? [styles.bold("Steer subagent"), ...steerEditor.render(width)]
+          : confirmation ? [styles.bold(confirmation.title), ...truncateToVisualLines(confirmation.message, Number.MAX_SAFE_INTEGER, Math.max(1, width), 0).visualLines.map((line) => line.trimEnd()), ...["Yes", "No"].map((option) => (option === "Yes") === confirmation?.yes ? `→ ${styles.accent(option)}` : `  ${option}`)]
+            : [];
         const rows = Math.max(1, tuiRows(tui) - DASHBOARD_FOOTER_ROWS);
         const hintRows = rows >= 3 ? 1 : 0;
         const viewport = Math.max(1, rows - hintRows - footer.length);
@@ -468,6 +535,7 @@ async function showDashboard(manager: SubagentManager, storageDirectory: string,
         const refreshHint = timer === undefined ? "" : " · auto-refresh 1s";
         const back = narrow && detailsMode ? "details" : "list";
         const hint = steerMode ? "enter submit · esc back"
+          : confirmation ? `${up}/${down} select · ${enter} confirm · ${esc} cancel`
           : actionMode ? `${up}/${down} actions · ${enter} run · ${keyLabel("tui.editor.cursorLeft", "←")} ${back} · ${esc} ${back}`
             : narrow && detailsMode ? `${up}/${down} scroll · ${enter} actions · a actions · ${esc} list${scroll}${refreshHint}`
               : `${up}/${down} select · ${enter} ${narrow ? "details" : "actions"} · a actions · ${esc} close${scroll}${refreshHint}`;
@@ -475,7 +543,15 @@ async function showDashboard(manager: SubagentManager, storageDirectory: string,
       },
       invalidate() {},
       handleInput(data: string) {
-        if (disposed || actionRunning) return;
+        if (disposed) return;
+        if (confirmation) {
+          if (matches(data, "tui.select.up") || matches(data, "tui.select.down")) confirmation.yes = !confirmation.yes;
+          else if (matches(data, "tui.select.confirm")) answer(confirmation.yes);
+          else if (matches(data, "tui.select.cancel")) answer(false);
+          requestRender();
+          return;
+        }
+        if (actionRunning) return;
         if (steerMode) {
           if (keybindings.matches(data, "tui.select.cancel")) { steerMode = false; actionMode = true; steerEditor.setText(""); }
           else steerEditor.handleInput(data);
@@ -545,8 +621,14 @@ async function runNavigator(manager: SubagentManager, storageDirectory: string, 
       await showDashboard(manager, storageDirectory, entries, context, clipboard);
       return;
     }
-    const choice = await context.ui.select("Subagents\n", [...labels, "Close"]);
+    const choice = await context.ui.select("Subagents\n", [...labels, "Close", ...bulkDeleteLabels(manager, entries)]);
     if (!choice || choice === "Close") return;
+    const bulk = BULK_DELETE[choice];
+    if (bulk !== undefined) {
+      try { await deleteAll(manager, storageDirectory, context, bulk, (title, message) => context.ui.confirm(title, message)); }
+      catch (error) { context.ui.notify(`Cannot delete ${bulk} runs: ${errorText(error)}`, "warning"); }
+      continue;
+    }
     const selected = entries[labels.indexOf(choice)];
     if (!selected) return;
     try {

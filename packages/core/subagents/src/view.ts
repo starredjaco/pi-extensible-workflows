@@ -1,6 +1,7 @@
-import type { AgentToolResult, ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
+import type { AgentToolResult, ExtensionAPI, ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
 import { truncateToWidth } from "@earendil-works/pi-tui";
 import { formatCost, formatStalledDuration, sanitizeDisplayText, WORKFLOW_AGENT_STALL_THRESHOLD_MS } from "../../src/index.js";
+import { drawFrame, formatElapsed, formatTokens, mark, QUIET_MS, type Paint } from "../../src/background-widget.js";
 import type { SubagentRunRequest, SubagentStatus } from "./contracts.js";
 
 const SPINNER = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"] as const;
@@ -113,11 +114,14 @@ function stalledDuration(status: SubagentStatus, now: number): number | undefine
   return duration >= WORKFLOW_AGENT_STALL_THRESHOLD_MS ? duration : undefined;
 }
 
-function accounting(status: SubagentStatus): string | undefined {
+/** Tokens and cost as the workflow header shows them. */
+function usageStats(status: SubagentStatus): string {
   const value = status.progress?.accounting;
-  if (!value) return undefined;
-  const total = value.input + value.output + value.cacheRead + value.cacheWrite;
-  return `tokens=${String(total)} cost=${formatCost(value.cost) || "$0.00"}`;
+  return value ? [formatTokens(value.input + value.output), formatCost(value.cost)].filter(Boolean).join(" · ") : "";
+}
+function modelName(status: SubagentStatus): string {
+  const model = status.progress?.state?.model ?? status.attemptDetails?.at(-1)?.setup.model;
+  return model ? `${model.model}${model.thinking ? `:${model.thinking}` : ""}` : "";
 }
 
 function timestamp(value: number | undefined): string | undefined {
@@ -141,8 +145,9 @@ function formatSubagentProgress(status: SubagentStatus, args: SubagentRenderArgs
   const color = stateColor(status.state);
   const elapsed = runtime(status.startedAt, status.finishedAt, now);
   const metadata = requestMetadata(args, args.id === undefined);
+  const stats = usageStats(status);
   const lines = [
-    `${theme.fg(color, stateGlyph(status.state, spinner))} ${theme.bold(theme.fg("accent", `Subagent: ${label({ ...args, id: status.id })}`))} ${theme.fg(color, `[${status.state}]`)}${metadata ? ` ${theme.fg("dim", metadata)}` : ""}${elapsed ? ` runtime=${elapsed}` : ""}`,
+    `${theme.fg(color, stateGlyph(status.state, spinner))} ${theme.bold(theme.fg("accent", `Subagent: ${label({ ...args, id: status.id })}`))} ${theme.fg(color, `[${status.state}]`)}${metadata ? ` ${theme.fg("dim", metadata)}` : ""}${stats ? ` ${stats}` : ""}${elapsed ? ` runtime=${elapsed}` : ""}`,
   ];
   const current = activity(status);
   const stalled = stalledDuration(status, now);
@@ -153,8 +158,6 @@ function formatSubagentProgress(status: SubagentStatus, args: SubagentRenderArgs
     lines.push(`  ${theme.fg("dim", `id=${status.id}`)}`);
     const model = status.progress?.state?.model;
     if (model) lines.push(`  ${theme.fg("dim", `model=${model.provider}/${model.model}${model.thinking ? `:${model.thinking}` : ""}`)}`);
-    const usage = accounting(status);
-    if (usage) lines.push(`  ${theme.fg("dim", usage)}`);
     if (status.worktree) lines.push(`  ${theme.fg("dim", `worktree=${status.worktree.path} branch=${status.worktree.branch}`)}`);
   }
   return lines.join("\n");
@@ -257,9 +260,77 @@ export function renderSubagentResult(result: AgentToolResult<unknown>, options: 
 
 type WidgetRun = { status: Readonly<SubagentStatus>; request: Readonly<SubagentRunRequest> };
 
-export function createSubagentBackgroundWidget() {
+/** One run as a workflow agent row: a quiet or stalled warning on the left, model and figures against the right rule. */
+function widgetRow({ status, request }: WidgetRun, now: number, paint: Paint): { text: string; right: string } {
+  const lastEventAt = status.progress?.lastEventAt;
+  const silent = lastEventAt === undefined || !Number.isFinite(lastEventAt) || now - lastEventAt < QUIET_MS ? undefined : now - lastEventAt;
+  const role = silent !== undefined && silent >= WORKFLOW_AGENT_STALL_THRESHOLD_MS ? "error" : "warning";
+  const icon = silent === undefined ? mark(status.state, now, paint) : paint(role, "⚠");
+  const warning = silent === undefined ? "" : `  ${paint(role, `${role === "error" ? "stalled" : "quiet"} ${formatElapsed(silent)}`)}`;
+  const accounting = status.progress?.accounting;
+  const attempts = status.attempts ?? 1;
+  const right = [
+    modelName(status),
+    formatTokens(accounting === undefined ? undefined : accounting.input + accounting.output),
+    formatCost(accounting?.cost),
+    status.startedAt === undefined ? "" : formatElapsed(now - status.startedAt),
+    attempts > 1 ? `attempt ${String(attempts)}` : "",
+  ].filter(Boolean).join(" · ");
+  return { text: `${icon} ${sanitizeDisplayText(label({ ...request, id: status.id }))}${warning}`, right };
+}
+
+const RECEIPT_ENTRY_TYPE = "piewf-subagent-receipt";
+type SubagentReceipt = { readonly id: string; readonly label: string; readonly state: string; readonly model?: string; readonly role?: string; readonly tools?: readonly string[]; readonly input: number; readonly output: number; readonly cacheRead: number; readonly costUsd: number; readonly durationMs: number; readonly attempts: number; readonly error?: string };
+
+function receiptFor(status: Readonly<SubagentStatus>, request: Readonly<SubagentRunRequest>): SubagentReceipt {
+  const accounting = status.progress?.accounting;
+  const model = modelName(status);
+  const role = roleName(request.role);
+  const tools = status.progress?.state?.tools ?? status.attemptDetails?.at(-1)?.setup.tools;
+  return {
+    id: status.id,
+    label: label({ ...request, id: status.id }),
+    state: status.state,
+    ...(model ? { model } : {}),
+    ...(role === undefined ? {} : { role }),
+    ...(tools === undefined ? {} : { tools: [...tools] }),
+    input: accounting?.input ?? 0,
+    output: accounting?.output ?? 0,
+    cacheRead: accounting?.cacheRead ?? 0,
+    costUsd: accounting?.cost ?? 0,
+    durationMs: status.startedAt === undefined ? 0 : Math.max(0, (status.finishedAt ?? Date.now()) - status.startedAt),
+    attempts: status.attempts ?? 1,
+    ...(status.error === undefined ? {} : { error: `${status.error.code}: ${status.error.message}` }),
+  };
+}
+
+/** The transcript line a finished background run leaves behind, in the shape of the workflow receipt. */
+export function renderSubagentReceipt(data: SubagentReceipt, expanded: boolean, theme: Theme): string[] {
+  const glyph = data.state === "completed" ? theme.fg("success", "✓") : data.state === "failed" ? theme.fg("error", "✗") : theme.fg("muted", "·");
+  const headline = [formatTokens(data.input + data.output), formatCost(data.costUsd) || "$0.00", formatElapsed(data.durationMs), data.state].filter(Boolean).join(" · ");
+  const lines = [`${glyph} ${theme.bold(sanitizeDisplayText(data.label))} ${theme.fg("muted", headline)}`];
+  if (!expanded) return lines;
+  const meta = [data.model ?? "", data.role ? `role ${data.role}` : "", data.attempts > 1 ? `${String(data.attempts)} attempts` : "", data.tools?.join(" ") ?? ""].filter(Boolean);
+  if (meta.length > 0) lines.push(theme.fg("muted", `   ${meta.join(" · ")}`));
+  const split = [data.input ? `in ${formatTokens(data.input)}` : "", data.output ? `out ${formatTokens(data.output)}` : "", data.cacheRead ? `cache ${formatTokens(data.cacheRead)}` : ""].filter(Boolean);
+  if (split.length > 0) lines.push(theme.fg("muted", `   ${split.join(" · ")}`));
+  if (data.error !== undefined) lines.push(theme.fg("error", `   ${sanitizeDisplayText(data.error)}`));
+  lines.push(theme.fg("muted", `   run ${data.id}`));
+  return lines;
+}
+
+type ReceiptHost = { appendEntry?: (customType: string, data: SubagentReceipt) => void; registerEntryRenderer?: ExtensionAPI["registerEntryRenderer"] };
+
+export function createSubagentBackgroundWidget(host: ReceiptHost = {}) {
   const key = "piewf-subagents-background";
   const runs = new Map<string, WidgetRun>();
+  const receipted = new Set<string>();
+  host.registerEntryRenderer?.<SubagentReceipt>(RECEIPT_ENTRY_TYPE, (entry, options, theme) => {
+    if (!entry.data) return undefined;
+    const lines = renderSubagentReceipt(entry.data, options.expanded, theme);
+    // Pi treats an over-wide line as fatal, and an error message has no bound.
+    return { render: (width: number): string[] => lines.map((line) => truncateToWidth(line, Math.max(1, width), "…")), invalidate() {} };
+  });
   let context: ExtensionContext | undefined;
   let requestRender: (() => void) | undefined;
   let timer: ReturnType<typeof setInterval> | undefined;
@@ -289,23 +360,14 @@ export function createSubagentBackgroundWidget() {
         return {
           render(width: number): string[] {
             const now = Date.now();
-            const frame = SPINNER[Math.floor(now / 80) % SPINNER.length] ?? "◇";
-            const title = theme.bold(theme.fg("accent", `Subagents (${String(runs.size)} running)`));
-            const blocks = [...runs.values()].map(({ status, request }) => formatSubagentProgress(status, request, theme, frame, now, false).split("\n"));
-            const allRunsFit = blocks.reduce((rows, block) => rows + block.length, 1) <= MAX_BACKGROUND_WIDGET_ROWS;
-            const runRowBudget = allRunsFit ? MAX_BACKGROUND_WIDGET_ROWS - 1 : MAX_BACKGROUND_WIDGET_ROWS - 2;
-            const lines = [title];
-            let runRows = 0;
-            let displayedRuns = 0;
-            for (const block of blocks) {
-              if (runRows + block.length > runRowBudget) break;
-              lines.push(...block);
-              runRows += block.length;
-              displayedRuns += 1;
-            }
-            const hiddenRuns = blocks.length - displayedRuns;
-            if (hiddenRuns > 0) lines.push(`… ${String(hiddenRuns)} more`);
-            return lines.map((line) => truncateToWidth(line, Math.max(1, width), "…"));
+            const paintRole: Paint = (role, text) => theme.fg(role, text);
+            // One row per run, so the default concurrency of eight fills the frame exactly.
+            // ponytail: no Alt+O scrolling as in the workflow widget; add it if runs routinely exceed the frame.
+            const budget = MAX_BACKGROUND_WIDGET_ROWS - 2;
+            const rows = [...runs.values()].map((run) => widgetRow(run, now, paintRole));
+            const body = rows.length <= budget ? rows : [...rows.slice(0, budget - 1), { text: theme.fg("muted", `… ${String(rows.length - budget + 1)} more`) }];
+            const title = runs.size === 1 ? "Subagent" : `Subagents · ${String(runs.size)} runs`;
+            return drawFrame(title, "", body, width, paintRole, (text) => theme.fg("accent", text)).map((line) => truncateToWidth(line, Math.max(1, width), ""));
           },
           invalidate() {},
         };
@@ -322,12 +384,19 @@ export function createSubagentBackgroundWidget() {
     start(next: ExtensionContext): void {
       hide();
       runs.clear();
+      receipted.clear();
       context = next.mode === "tui" ? next : undefined;
     },
     update(status: Readonly<SubagentStatus>, request: Readonly<SubagentRunRequest>): void {
       if (request.mode !== "background" || context === undefined) return;
-      if (TERMINAL_STATES.has(status.state)) runs.delete(status.id);
-      else runs.set(status.id, { status, request });
+      if (TERMINAL_STATES.has(status.state)) {
+        runs.delete(status.id);
+        // A foreground run already has its tool block; a background one leaves a receipt, once, like a workflow run.
+        if (!receipted.has(status.id)) {
+          receipted.add(status.id);
+          try { host.appendEntry?.(RECEIPT_ENTRY_TYPE, receiptFor(status, request)); } catch { /* A receipt is display-only. */ }
+        }
+      } else runs.set(status.id, { status, request });
       paint();
     },
     dispose(): void {

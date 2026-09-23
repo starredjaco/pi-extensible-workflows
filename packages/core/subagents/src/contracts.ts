@@ -162,6 +162,8 @@ export interface SubagentManager {
   steer(request: Readonly<SubagentSteerRequest>, context: Readonly<SubagentManagerContext>): Promise<unknown>;
   stop(request: Readonly<SubagentIdRequest>, context: Readonly<SubagentManagerContext>): Promise<unknown>;
   retry(request: Readonly<SubagentIdRequest>, context: Readonly<SubagentManagerContext>): Promise<unknown>;
+  /** Removes a settled run record; used by the /subagents navigator only. */
+  delete?(request: Readonly<SubagentIdRequest>, context: Readonly<SubagentManagerContext>): Promise<unknown>;
   getAttemptActionData?(id: string): Readonly<SubagentAttemptActionData> | undefined;
   dispose?(): Promise<void>;
 }
