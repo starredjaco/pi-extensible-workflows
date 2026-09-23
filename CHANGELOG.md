@@ -1,6 +1,12 @@
 # Changelog
 ## Unreleased
 
+## [5.16.1] - 2026-09-23
+
+### Fixes
+
+- Trajectory no longer blanks a live subagent's or agent's events for about a second when its transcript grows between a state poll and the transcript read; the stale reply keeps the cached entries until the newer revision arrives.
+
 ## [5.16.0] - 2026-09-23
 
 ### Breaking changes
