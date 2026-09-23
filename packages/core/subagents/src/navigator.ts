@@ -259,8 +259,8 @@ async function steerSubagent(manager: SubagentManager, storageDirectory: string,
   await manager.steer({ id: entry.status.id, message }, managerContext(context));
   context.ui.notify(`Steered subagent ${entry.status.id}.`, "info");
 }
-/** `cancelled` means the user declined, so the menu stays where it was. */
-type ActionOutcome = "stay" | "cancelled" | "deleted" | { readonly retryId: string };
+/** `unchanged` leaves the menu where it was, as /workflow does after an editor or copy action: the user declined, or the action does not touch the run. */
+type ActionOutcome = "stay" | "unchanged" | "deleted" | { readonly retryId: string };
 async function performAction(manager: SubagentManager, storageDirectory: string, entry: NavigatorEntry, action: string, context: ExtensionCommandContext, tui: NavigatorTui | undefined, clipboard: (value: string) => Promise<void>, confirm: Confirm): Promise<ActionOutcome> {
   const fresh = await inspectEntry(manager, storageDirectory, entry, context);
   const available = actionOptions(manager, fresh, context);
@@ -272,27 +272,27 @@ async function performAction(manager: SubagentManager, storageDirectory: string,
     await registered[1].runStandalone(actionContext);
     return "stay";
   }
-  if (action === "Copy agent ID") { await clipboard(fresh.entry.status.id); context.ui.notify("Copied agent ID.", "info"); return "stay"; }
-  if (action === "Copy run path") { await clipboard(join(storageDirectory, fresh.entry.status.id)); context.ui.notify("Copied run path.", "info"); return "stay"; }
+  if (action === "Copy agent ID") { await clipboard(fresh.entry.status.id); context.ui.notify("Copied agent ID.", "info"); return "unchanged"; }
+  if (action === "Copy run path") { await clipboard(join(storageDirectory, fresh.entry.status.id)); context.ui.notify("Copied run path.", "info"); return "unchanged"; }
   if (action === "Delete" && manager.delete !== undefined) {
-    if (!await confirm("Delete subagent?", `Delete ${entryName(fresh.entry)} (${fresh.entry.status.id}) and its record? This cannot be undone.`)) return "cancelled";
+    if (!await confirm("Delete subagent?", `Delete ${entryName(fresh.entry)} (${fresh.entry.status.id}) and its record? This cannot be undone.`)) return "unchanged";
     await manager.delete({ id: fresh.entry.status.id }, managerContext(context));
     context.ui.notify(`Deleted subagent ${fresh.entry.status.id}.`, "info");
     return "deleted";
   }
-  if (action === "Copy branch" && fresh.entry.status.worktree) { await clipboard(fresh.entry.status.worktree.branch); context.ui.notify("Copied branch.", "info"); return "stay"; }
-  if (action === "Copy worktree path" && fresh.entry.status.worktree) { await clipboard(fresh.entry.status.worktree.path); context.ui.notify("Copied worktree path.", "info"); return "stay"; }
-  if (action === "Open prompt in editor" && tui && fresh.entry.request?.prompt !== undefined) { await openNavigatorArtifact(context, tui, workflowPromptArtifact(fresh.entry.request.prompt), "agent prompt"); return "stay"; }
-  if (action === "Open system prompt in editor" && tui) { const systemPrompt = liveSystemPrompt(manager, fresh.entry.status); if (systemPrompt !== undefined) { await openNavigatorArtifact(context, tui, workflowPromptArtifact(systemPrompt), "agent system prompt"); return "stay"; } }
-  if (action === "Open result in editor" && tui && Object.prototype.hasOwnProperty.call(fresh.record, "value") && jsonValue(fresh.record.value)) { await openNavigatorArtifact(context, tui, workflowResultArtifact(fresh.record.value), "agent result"); return "stay"; }
+  if (action === "Copy branch" && fresh.entry.status.worktree) { await clipboard(fresh.entry.status.worktree.branch); context.ui.notify("Copied branch.", "info"); return "unchanged"; }
+  if (action === "Copy worktree path" && fresh.entry.status.worktree) { await clipboard(fresh.entry.status.worktree.path); context.ui.notify("Copied worktree path.", "info"); return "unchanged"; }
+  if (action === "Open prompt in editor" && tui && fresh.entry.request?.prompt !== undefined) { await openNavigatorArtifact(context, tui, workflowPromptArtifact(fresh.entry.request.prompt), "agent prompt"); return "unchanged"; }
+  if (action === "Open system prompt in editor" && tui) { const systemPrompt = liveSystemPrompt(manager, fresh.entry.status); if (systemPrompt !== undefined) { await openNavigatorArtifact(context, tui, workflowPromptArtifact(systemPrompt), "agent system prompt"); return "unchanged"; } }
+  if (action === "Open result in editor" && tui && Object.prototype.hasOwnProperty.call(fresh.record, "value") && jsonValue(fresh.record.value)) { await openNavigatorArtifact(context, tui, workflowResultArtifact(fresh.record.value), "agent result"); return "unchanged"; }
   if (action === "Steer") {
     const message = await context.ui.input("Steer subagent", "Message for the running subagent");
-    if (message === undefined) return "cancelled";
+    if (message === undefined) return "unchanged";
     await steerSubagent(manager, storageDirectory, entry, context, message);
     return "stay";
   }
   if (action === "Stop") {
-    if (!await confirm("Stop subagent?", `Stop subagent ${entryName(fresh.entry)} (${fresh.entry.status.id})? This cannot be undone.`)) return "cancelled";
+    if (!await confirm("Stop subagent?", `Stop subagent ${entryName(fresh.entry)} (${fresh.entry.status.id})? This cannot be undone.`)) return "unchanged";
     const current = await inspectEntry(manager, storageDirectory, entry, context);
     if (current.entry.status.state !== "running") throw new Error(`Subagent ${entry.status.id} is no longer running`);
     await manager.stop({ id: entry.status.id }, managerContext(context));
@@ -481,9 +481,9 @@ async function showDashboard(manager: SubagentManager, storageDirectory: string,
       actionRunning = true;
       requestRender();
       const bulk = BULK_DELETE[action];
-      const pending = bulk === undefined ? performAction(manager, storageDirectory, inspection.entry, action, context, tui, clipboard, confirmInline) : deleteAll(manager, storageDirectory, context, bulk, confirmInline).then((done): ActionOutcome => done ? "stay" : "cancelled");
+      const pending = bulk === undefined ? performAction(manager, storageDirectory, inspection.entry, action, context, tui, clipboard, confirmInline) : deleteAll(manager, storageDirectory, context, bulk, confirmInline).then((done): ActionOutcome => done ? "stay" : "unchanged");
       void pending.then(async (outcome) => {
-        if (disposed || outcome === "cancelled") return;
+        if (disposed || outcome === "unchanged") return;
         // The action already happened: a failed reload must not read as a failed action that invites a second retry.
         await reloadAfterAction(typeof outcome === "object" ? outcome.retryId : undefined);
         actionMode = false;

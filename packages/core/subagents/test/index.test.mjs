@@ -33,6 +33,22 @@ function testContext() {
   return {};
 }
 
+/** Presses down until `label` is the selected action; the dashboard ignores keys while an action runs, so ignored presses are retried. */
+async function selectAction(component, label) {
+  await waitFor(() => {
+    if (component.render(140).join("\n").includes(`→ ${label}`)) return true;
+    component.handleInput("tui.select.down");
+    return false;
+  });
+}
+/** Presses escape until the dashboard closes, for the same reason. */
+async function closeDashboard(component, isClosed) {
+  await waitFor(() => {
+    if (!isClosed()) component.handleInput("escape");
+    return isClosed();
+  });
+}
+
 /** A notify that fails the test on warnings; the navigator reports caught errors, assertion failures included, as warnings. */
 function strictNotify(notices = []) {
   return (message, level) => {
@@ -689,7 +705,8 @@ test("matches workflow agent detail fields and runs standalone registered and co
         let component;
         let finish;
         const completed = new Promise((resolve) => { finish = resolve; });
-        component = factory({ terminal: { rows: 30 }, requestRender() {} }, theme, { matches(data, binding) { return (data === "escape" && binding === "tui.select.cancel") || data === binding; } }, (value) => finish(value));
+        let closed = false;
+        component = factory({ terminal: { rows: 30 }, requestRender() {} }, theme, { matches(data, binding) { return (data === "escape" && binding === "tui.select.cancel") || data === binding; } }, (value) => { closed = true; finish(value); });
         renders.push(component.render(140).join("\n"));
         assert.match(renders.at(-1), /Activity: read/);
         assert.match(renders.at(-1), /stalled\? 10m/);
@@ -718,17 +735,18 @@ test("matches workflow agent detail fields and runs standalone registered and co
         assert.equal(actionContext.session.sessionId, "agent-session");
         await waitFor(() => !component.render(140).join("\n").includes("Agent actions"));
         const copyAction = async (label) => {
-          component.handleInput("a");
-          for (let index = 0; index < 12 && !component.render(140).join("\n").includes(`→ ${label}`); index += 1) component.handleInput("tui.select.down");
+          await selectAction(component, label);
           const count = copied.length;
           component.handleInput("tui.select.confirm");
           await waitFor(() => copied.length === count + 1);
-          await waitFor(() => !component.render(140).join("\n").includes("Agent actions"));
           return copied.at(-1);
         };
+        component.handleInput("a");
         assert.equal(await copyAction("Copy agent ID"), status.id);
+        // Copying leaves the menu open, as in /workflow: selecting the next action needs the menu still there.
         assert.equal(await copyAction("Copy run path"), join(storageDir, status.id));
-        component.handleInput("escape");
+        assert.match(component.render(140).join("\n"), /Agent actions/);
+        await closeDashboard(component, () => closed);
         return completed;
       },
       notify: strictNotify(),
@@ -1324,24 +1342,21 @@ test("opens bounded prompt and result artifacts while terminal runs hide system 
       async custom(factory) {
         let finish;
         const completed = new Promise((resolve) => { finish = resolve; });
-        const component = factory({ terminal: { rows: 30 }, stop() {}, start() {}, requestRender() {} }, { fg: (_color, text) => text, bold: (text) => text }, { matches(data, binding) { return data === binding || data === "escape" && binding === "tui.select.cancel"; } }, (value) => finish(value));
+        let closed = false;
+        const component = factory({ terminal: { rows: 30 }, stop() {}, start() {}, requestRender() {} }, { fg: (_color, text) => text, bold: (text) => text }, { matches(data, binding) { return data === binding || data === "escape" && binding === "tui.select.cancel"; } }, (value) => { closed = true; finish(value); });
         const waitForArtifact = async (label, marker) => {
-          for (let step = 0; step < 100; step += 1) {
-            if (component.render(140).join("\n").includes(`→ ${label}`)) { component.handleInput("tui.select.confirm"); break; }
-            component.handleInput("tui.select.down");
-            await new Promise((resolve) => setTimeout(resolve, 1));
-          }
+          await selectAction(component, label);
+          component.handleInput("tui.select.confirm");
           await waitFor(async () => { try { return (await readFile(editedPath, "utf8")).includes(marker); } catch { return false; } });
           assert.match(await readFile(openedPath, "utf8"), /artifact\.(md|json)$/);
-          await waitFor(() => !component.render(140).join("\n").includes("Agent actions"));
-          component.handleInput("a");
         };
         component.handleInput("a");
         assert.doesNotMatch(component.render(140).join("\n"), /Open system prompt in editor/);
         await waitForArtifact("Open prompt in editor", "PROMPT_START");
+        // Back from the editor the menu stays open, as in /workflow, so the result is one keypress away.
         await waitForArtifact("Open result in editor", '"answer": 42');
-        component.handleInput("escape");
-        component.handleInput("escape");
+        assert.match(component.render(140).join("\n"), /Agent actions[\s\S]*→ Open result in editor/);
+        await closeDashboard(component, () => closed);
         return completed;
       },
       notify(message) { throw new Error(message); },
