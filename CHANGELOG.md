@@ -1,10 +1,6 @@
 # Changelog
 ## Unreleased
 
-### Fixes
-
-- A subagent that settled just before its manager was disposed, for example at session shutdown, no longer stays `running` on disk. Disposal skipped the terminal status write, and a new manager in the same Pi process treated the record as owned by a live process, so it kept showing as running and could not be retried.
-
 ## [5.17.0] - 2026-09-23
 
 ### New capabilities
@@ -17,6 +13,7 @@
 ### Fixes
 
 - Declining the Stop confirmation in the `/workflow` dashboard no longer leaves Pi stuck. Pi's confirm dialog replaced the dashboard and then restored the editor, so the `/workflow` command never finished: later messages and extension commands such as `/subagents` queued without running, and the workflow widget stayed hidden. The question now appears inside the dashboard, as in `/subagents`; declining keeps the dashboard open on the action menu.
+- A subagent that settled just before its manager was disposed, for example at session shutdown, no longer stays `running` on disk. Disposal skipped the terminal status write, and a new manager in the same Pi process treated the record as owned by a live process, so it kept showing as running and could not be retried.
 
 ## [5.16.3] - 2026-09-23
 
