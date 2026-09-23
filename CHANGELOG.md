@@ -1,6 +1,8 @@
 # Changelog
 ## Unreleased
 
+## [5.17.0] - 2026-09-23
+
 ### New capabilities
 
 - `/subagents` opens the `/workflow` dashboard layout instead of a picker followed by a `key=value` detail dump. The run list sits beside the selected run's details at 80 columns or wider and drills down from list to details to actions below that, with the same configured and vim key hints and page scrolling. While a run is active, the active runs and the selection refresh every second. Details show the run ID and the shared agent fields in the `/workflow` agent order; the prompt, live system prompt, and result open in the editor, as in `/workflow`, and editor and copy actions leave the action menu open. A running run shows its live activity through the new opt-in `includeActivity` inspection context; `subagents_inspect` still leaves activity out. A retry selects the new run, and a repeated name carries its short ID in the list, as in the `/workflow` picker. Outside the TUI, the picker rows follow the `/workflow` picker: state glyph, name, state, model, cost, and runtime.
