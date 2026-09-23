@@ -3,7 +3,7 @@ import { truncateToWidth } from "@earendil-works/pi-tui";
 import { type AwaitingCheckpoint, type PersistedRun, type RunStore, type WorktreeReference } from "./persistence.js";
 import { budgetUsage } from "./budget.js";
 import { formatCost, formatTokens } from "./background-widget.js";
-import { BUDGET_DIMENSIONS, HARD_TERMINAL_RUN_STATES, SETTLED_AGENT_STATES, WORKFLOW_AGENT_STALL_THRESHOLD_MS, sumAccounting, type AgentAccounting, type AgentAttemptAction, type AgentAttemptActionContext, type AgentRecord, type LaunchSnapshot, type StandaloneAgentAttemptActionContext, type WorkflowCatalogFunction, type WorkflowCatalogIndex } from "./types.js";
+import { BUDGET_DIMENSIONS, HARD_TERMINAL_RUN_STATES, SETTLED_AGENT_STATES, WORKFLOW_AGENT_STALL_THRESHOLD_MS, sumAccounting, zeroAccounting, type AgentAccounting, type AgentAttemptAction, type AgentAttemptActionContext, type AgentRecord, type LaunchSnapshot, type StandaloneAgentAttemptActionContext, type WorkflowCatalogFunction, type WorkflowCatalogIndex } from "./types.js";
 import { object, sanitizeDisplayText } from "./utils.js";
 import {
   WORKFLOW_PHASE_STATES,
@@ -96,7 +96,7 @@ function formatLogTimestamp(timestamp: number | undefined): string {
   if (Number.isNaN(date.getTime())) return "--:--:--";
   return [date.getHours(), date.getMinutes(), date.getSeconds()].map((part) => String(part).padStart(2, "0")).join(":");
 }
-function workflowLogLines(run: PersistedRun, styles: WorkflowProgressStyles, expanded: boolean, width?: number, showHint = false): string[] {
+function workflowLogLines(run: PersistedRun, styles: WorkflowProgressStyles, expanded: boolean, width?: number, showHint = false, tail = 5): string[] {
   const events = (run.events ?? []).filter((event) => event.type === "log");
   if (!events.length) return [];
   const indent = " ".repeat(11);
@@ -106,12 +106,48 @@ function workflowLogLines(run: PersistedRun, styles: WorkflowProgressStyles, exp
     const chunks = truncateToVisualLines(message, Number.MAX_SAFE_INTEGER, Math.max(1, width - 11), 0).visualLines;
     return chunks.map((chunk, chunkIndex) => `${chunkIndex === 0 ? prefix : indent}${chunk}`);
   }));
-  const visible = expanded ? visualLines : visualLines.slice(-5);
+  const visible = expanded ? visualLines : visualLines.slice(-tail);
   let hint = "";
   if (!expanded && showHint) { try { hint = ` (${keyHint("app.tools.expand", "to expand")})`; } catch { /* Theme is unavailable in non-interactive render tests. */ } }
   return [expanded ? `  ${styles.muted("Logs")}` : `  ${styles.muted(`Logs${hint}`)}`, ...visible];
 }
-export function formatWorkflowProgress(run: PersistedRun, spinner = "◇", styles: WorkflowProgressStyles = PLAIN_WORKFLOW_PROGRESS_STYLES, now = Date.now(), expanded = false, width?: number, showHint = false): string {
+const ACTIVE_AGENT_STATES: ReadonlySet<string> = new Set(["running", "waiting_for_child", "retrying", "paused"]);
+const COMPACT_RECENT_SETTLED = 3;
+const COMPACT_LOG_LINES = 3;
+function expandHint(): string { try { return ` (${keyHint("app.tools.expand", "to expand")})`; } catch { return ""; } }
+function agentEnd(agent: AgentRecord): number { return (agent.startedAt ?? 0) + (agent.durationMs ?? 0); }
+/** One line for a finished phase: outcome counts, wall time across its agents, tokens, and cost. */
+function phaseSummary(agents: readonly AgentRecord[], styles: WorkflowProgressStyles): string {
+  const count = (state: string) => agents.filter((agent) => agent.state === state).length;
+  const starts = agents.map((agent) => agent.startedAt).filter((value): value is number => value !== undefined);
+  const span = starts.length ? Math.max(...agents.map(agentEnd)) - Math.min(...starts) : 0;
+  const accounting = sumAccounting(agents.map((agent) => agent.accounting ?? zeroAccounting()));
+  const failed = count("failed");
+  const parts = [`${String(count("completed"))} done`, ...(failed ? [styles.error(`${String(failed)} failed`)] : []), ...(count("cancelled") ? [`${String(count("cancelled"))} cancelled`] : []), ...(span > 0 ? [formatWorkflowRuntime(span)] : []), formatTokens(accounting.input + accounting.output), formatCost(accounting.cost)].filter(Boolean);
+  return styles.muted(parts.join(" · "));
+}
+/**
+ * Renders the run; with `maxLines`, a view taller than that limit switches to a compact one so the live block stays on screen.
+ * A block taller than the terminal pushes its changing header above the viewport, and pi-tui then clears and redraws the whole
+ * scrollback on every update, which snaps the reader back to the bottom.
+ */
+export function formatWorkflowProgress(run: PersistedRun, spinner = "◇", styles: WorkflowProgressStyles = PLAIN_WORKFLOW_PROGRESS_STYLES, now = Date.now(), expanded = false, width?: number, showHint = false, maxLines?: number): string {
+  const full = workflowProgressLines(run, spinner, styles, now, expanded, width, showHint);
+  if (expanded || maxLines === undefined || full.length <= maxLines) return full.join("\n");
+  // Finished phases collapse to a summary line; the current one keeps failed, active, and the latest settled agents, in that priority.
+  const phases = run.phaseHistory?.length ? run.phaseHistory : run.phase ? [{ phase: run.phase, afterAgent: 0 }] : [];
+  const currentStart = Math.min(run.agents.length, phases.at(-1)?.afterAgent ?? 0);
+  const current = run.agents.slice(currentStart);
+  const recent = current.filter((agent) => SETTLED_AGENT_STATES.has(agent.state) && agent.state !== "failed").sort((left, right) => agentEnd(right) - agentEnd(left)).slice(0, COMPACT_RECENT_SETTLED);
+  const candidates = [...current.filter((agent) => agent.state === "failed"), ...current.filter((agent) => ACTIVE_AGENT_STATES.has(agent.state)), ...recent];
+  const render = (count: number) => workflowProgressLines(run, spinner, styles, now, false, width, showHint, new Set(candidates.slice(0, count)));
+  let low = 0;
+  let high = candidates.length;
+  while (low < high) { const middle = Math.ceil((low + high) / 2); if (render(middle).length <= maxLines) low = middle; else high = middle - 1; }
+  // NOTE: failures in finished phases always stay listed, so a run with more of them than maxLines still overflows.
+  return render(low).join("\n");
+}
+function workflowProgressLines(run: PersistedRun, spinner: string, styles: WorkflowProgressStyles, now: number, expanded: boolean, width: number | undefined, showHint: boolean, shown?: ReadonlySet<AgentRecord>): string[] {
   const done = run.agents.filter((agent) => SETTLED_AGENT_STATES.has(agent.state)).length;
   const workflowIcon = runStateGlyph(run.state, spinner);
   const iconStyle = workflowIconStyle(run.state, styles);
@@ -126,14 +162,15 @@ export function formatWorkflowProgress(run: PersistedRun, spinner = "◇", style
   const shellActivity = scopedShells ? undefined : formatShellActivity(run.activeShells, run.activeShellStartedAt, spinner, styles, now);
   if (shellActivity) lines.push(`  ${shellActivity}`);
   const byId = new Map(run.agents.map((agent) => [agent.id, agent]));
-  const renderAgents = (agents: readonly AgentRecord[], offset: number, nested: boolean) => renderGroupedAgents(agents, ({ agent, index, depth }, grouped) => {
+  const position = new Map(run.agents.map((agent, index) => [agent, index]));
+  const renderAgents = (agents: readonly AgentRecord[], nested: boolean) => renderGroupedAgents(agents, ({ agent, depth }, grouped) => {
     const icon = agentStateGlyph(agent.state, spinner);
     const indent = "  ".repeat((grouped ? 2 : 1) + depth);
     const activity = SETTLED_AGENT_STATES.has(agent.state) ? "" : formatAgentActivity(agent, spinner, styles, now);
     const name = grouped ? agent.label ?? agent.name : styledAgentBreadcrumb(agent, byId, styles);
     const state = progressStyleForState(agent.state, styles);
     const detail = expanded ? formatWorkflowAgentDetail(agent, now) : "";
-    return `${indent}#${String(offset + index + 1)} ${state(icon)} ${name} ${state(`[${agent.state}]`)}${activity ? ` ${activity}` : ""}${detail ? ` ${detail}` : ""}`;
+    return `${indent}#${String((position.get(agent) ?? 0) + 1)} ${state(icon)} ${name} ${state(`[${agent.state}]`)}${activity ? ` ${activity}` : ""}${detail ? ` ${detail}` : ""}`;
   }, run.agents, (label) => styles.muted(label)).map((line) => nested ? `  ${line}` : line);
   const phases = run.phaseHistory?.length ? run.phaseHistory : run.phase ? [{ phase: run.phase, afterAgent: 0 }] : [];
   if (scopedShells) {
@@ -146,10 +183,23 @@ export function formatWorkflowProgress(run: PersistedRun, spinner = "◇", style
   }
   let renderedAgents = 0;
   let nested = false;
+  // In compact mode (`shown` set) earlier segments list only their failures, and the current one only the shown agents plus a count of the rest.
+  const segment = (agents: readonly AgentRecord[], closed: boolean) => {
+    if (!shown) return renderAgents(agents, nested);
+    const listed = agents.filter((agent) => closed ? agent.state === "failed" : shown.has(agent));
+    const hidden = closed ? [] : agents.filter((agent) => !shown.has(agent));
+    const counts = [["queued", hidden.filter((agent) => !SETTLED_AGENT_STATES.has(agent.state) && !ACTIVE_AGENT_STATES.has(agent.state)).length], ["running", hidden.filter((agent) => ACTIVE_AGENT_STATES.has(agent.state)).length], ["done", hidden.filter((agent) => SETTLED_AGENT_STATES.has(agent.state)).length]] as const;
+    const summary = counts.filter(([, count]) => count > 0).map(([label, count]) => `+${String(count)} ${label}`).join(" · ");
+    return [...renderAgents(listed, nested), ...(summary ? [`${nested ? "    " : "  "}${styles.muted(`… ${summary}${showHint ? expandHint() : ""}`)}`] : [])];
+  };
   for (const [phaseIndex, phase] of phases.entries()) {
     const boundary = Math.max(renderedAgents, Math.min(run.agents.length, phase.afterAgent));
-    lines.push(...renderAgents(run.agents.slice(renderedAgents, boundary), renderedAgents, nested));
-    lines.push(`  ${styles.muted(`[Phase: ${phase.phase}]`)}`);
+    const before = run.agents.slice(renderedAgents, boundary);
+    if (shown && !nested && before.length) lines.push(`  ${phaseSummary(before, styles)}`);
+    lines.push(...segment(before, true));
+    const next = phases[phaseIndex + 1];
+    const phaseAgents = next ? run.agents.slice(boundary, Math.max(boundary, Math.min(run.agents.length, next.afterAgent))) : [];
+    lines.push(`  ${styles.muted(`[Phase: ${phase.phase}]`)}${shown && next ? ` ${phaseSummary(phaseAgents, styles)}` : ""}`);
     const phaseShell = scopedShells ? shellActivityFor(run, phaseIndex) : undefined;
     if (phaseShell) {
       const rendered = formatShellActivity(phaseShell.active, phaseShell.startedAt, spinner, styles, now);
@@ -158,9 +208,9 @@ export function formatWorkflowProgress(run: PersistedRun, spinner = "◇", style
     renderedAgents = boundary;
     nested = true;
   }
-  lines.push(...renderAgents(run.agents.slice(renderedAgents), renderedAgents, nested));
-  lines.push(...workflowLogLines(run, styles, expanded, width, showHint));
-  return lines.join("\n");
+  lines.push(...segment(run.agents.slice(renderedAgents), false));
+  lines.push(...workflowLogLines(run, styles, expanded, width, showHint, shown ? COMPACT_LOG_LINES : 5));
+  return lines;
 }
 
 const workflowSpinner = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
@@ -408,7 +458,11 @@ export function workflowProgressBlock(run: PersistedRun, theme: Theme, progress?
       }
       previousState = displayed.state;
       const frame = displayed.state === "running" ? workflowSpinner[Math.floor(now / 80) % workflowSpinner.length] ?? "◇" : "◇";
-      const progressText = formatWorkflowProgress(displayed, frame, styles, now, expanded, width, true);
+      // pi-tui only patches rows that are still on screen; leave room below the block for the editor and footer.
+      // A finished or frozen block no longer changes, so it keeps the full list.
+      const rows = freezeAt === undefined && !terminal ? process.stdout.rows : undefined;
+      const maxLines = rows ? Math.max(6, rows - 10) - (prefix ? prefix.split("\n").length + 1 : 0) : undefined;
+      const progressText = formatWorkflowProgress(displayed, frame, styles, now, expanded, width, true, maxLines);
       return truncateWorkflowProgress(prefix ? `${prefix}\n\n${progressText}` : progressText, width);
     },
     setExpanded(value: boolean) { expanded = value; },

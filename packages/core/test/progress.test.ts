@@ -6,7 +6,7 @@ import test from "node:test";
 import { visibleWidth } from "@earendil-works/pi-tui";
 import { contextualWorkflowAction, testExtensionApi, waitForIssue105 } from "./support.js";
 import workflowExtension, { createLaunchSnapshot, DEFAULT_SETTINGS, formatAgentDetail, formatCost, formatNavigatorDashboard, formatNavigatorRun, formatWorkflowPhaseDashboard, formatWorkflowProgress, mergeBudget, RunStore, truncateWorkflowProgress, WORKFLOW_AGENT_STALL_THRESHOLD_MS, type AgentRecord, type PersistedRun } from "../src/index.js";
-import { navigatorRunLabels, textBlock } from "../src/host-view.js";
+import { navigatorRunLabels, textBlock, workflowProgressBlock } from "../src/host-view.js";
 import { listRunIds } from "../src/persistence.js";
 import { testTransport, type TestPiSession, type TestPiSessionEvent } from "./test-transport.js";
 
@@ -589,4 +589,42 @@ void test("workflow progress keeps top-level agents separate from review-loop gr
   const progress = formatWorkflowProgress(run);
   assert.match(progress, / {2}Agents\n {4}#1 ✓ scout \[completed\]/);
   assert.match(progress, / {2}reviewLoop\.developUntilApproved\n {4}#2 ◇ developer \[running\]/);
+});
+
+void test("workflow progress compacts only past the line limit and keeps its header, failures, and active agents on screen", () => {
+  const now = 10_000_000;
+  const settled = (index: number, state: AgentRecord["state"]) => makeAgent({ id: `run:${String(index)}`, name: `agent-${String(index)}`, path: `run:${String(index)}`, state, startedAt: now - 600_000 + index * 1_000, durationMs: 5_000, accounting: { input: 1_000, output: 500, cacheRead: 0, cacheWrite: 0, cost: 0.01 } });
+  const agents = [
+    ...Array.from({ length: 12 }, (_, index) => settled(index, index === 4 ? "failed" : "completed")),
+    ...Array.from({ length: 20 }, (_, index) => settled(12 + index, "completed")),
+    ...Array.from({ length: 3 }, (_, index) => makeAgent({ id: `run:live${String(index)}`, name: `live-${String(index)}`, path: `run:live${String(index)}`, state: "running", startedAt: now - 1_000 })),
+    ...Array.from({ length: 8 }, (_, index) => makeAgent({ id: `run:q${String(index)}`, name: `queued-${String(index)}`, path: `run:q${String(index)}`, state: "queued" })),
+  ];
+  const run = makeRun({ workflowName: "wide", phase: "clean", phaseHistory: [{ phase: "inventory", afterAgent: 0 }, { phase: "clean", afterAgent: 12 }], agents, events: Array.from({ length: 6 }, (_, index) => ({ type: "log" as const, timestamp: now, message: `log ${String(index)}` })) });
+  const full = formatWorkflowProgress(run, "◇", undefined, now).split("\n");
+  assert.equal(formatWorkflowProgress(run, "◇", undefined, now, false, undefined, false, full.length), full.join("\n"));
+  const compact = formatWorkflowProgress(run, "◇", undefined, now, false, undefined, false, 16).split("\n");
+  assert.ok(compact.length <= 16, compact.join("\n"));
+  assert.equal(compact[0], full[0]);
+  assert.match(compact.join("\n"), /\[Phase: inventory\] 11 done · 1 failed · 16s · 18kt · \$0\.12/);
+  assert.match(compact.join("\n"), /#5 ✗ agent-4 \[failed\]/);
+  for (const index of [0, 1, 2]) assert.match(compact.join("\n"), new RegExp(`#${String(33 + index)} ◇ live-${String(index)} \\[running\\]`));
+  assert.match(compact.join("\n"), /… \+8 queued · \+\d+ done/);
+  assert.equal(compact.filter((line) => /^\s+\d\d:\d\d:\d\d log /.test(line) || /log \d$/.test(line)).length, 3);
+  // Expanded view is the reader's explicit choice and is never compacted.
+  assert.equal(formatWorkflowProgress(run, "◇", undefined, now, true, undefined, false, 16).split("\n").length, formatWorkflowProgress(run, "◇", undefined, now, true).split("\n").length);
+});
+
+void test("workflow progress block compacts only while the run is still live", () => {
+  const theme = { fg: (_color: string, text: string) => text, bold: (text: string) => text } as unknown as Parameters<typeof workflowProgressBlock>[1];
+  const agents = Array.from({ length: 40 }, (_, index) => makeAgent({ id: `run:${String(index)}`, name: `agent-${String(index)}`, path: `run:${String(index)}`, state: index < 38 ? "completed" : "running" }));
+  const rows = Object.getOwnPropertyDescriptor(process.stdout, "rows");
+  Object.defineProperty(process.stdout, "rows", { configurable: true, value: 30 });
+  try {
+    assert.ok(workflowProgressBlock(makeRun({ agents }), theme).render(120).length <= 20);
+    const finished = makeRun({ state: "completed", agents: agents.map((agent) => ({ ...agent, state: "completed" as const })) });
+    assert.ok(workflowProgressBlock(finished, theme).render(120).length > 40);
+  } finally {
+    if (rows) Object.defineProperty(process.stdout, "rows", rows); else Reflect.deleteProperty(process.stdout, "rows");
+  }
 });
