@@ -6,7 +6,7 @@ import { type WorkflowRegistryApi } from "./registry.js";
 import { deepFreeze, errorText, object, resolveModelReference, validateModelAliases } from "./utils.js";
 import { saveModelAliases, resolveWorkflowSettings, workflowProjectSettingsPath, workflowSettingsPath } from "./validation.js";
 import { openWorkflowArtifact, workflowPromptArtifact, workflowResultArtifact, workflowScriptArtifact, type WorkflowArtifact } from "./workflow-artifacts.js";
-import { agentActionLabels, agentBreadcrumb, formatCheckpointReview, formatNavigatorRun, formatWorkflowPhaseDashboard, navigatorAttentionSort, navigatorRunLabels, SETTLED_AGENT_STATES, themeWorkflowProgressStyles, visibleAgentAttemptActions as visibleRegisteredAgentAttemptActions } from "./host-view.js";
+import { agentActionLabels, agentBreadcrumb, formatCheckpointReview, formatNavigatorRun, formatWorkflowPhaseDashboard, navigatorAttentionSort, navigatorRunLabels, SETTLED_AGENT_STATES, themeWorkflowProgressStyles, visibleAgentAttemptActions as visibleRegisteredAgentAttemptActions, type WorkflowProgressStyles } from "./host-view.js";
 import { buildWorkflowPhaseModel, buildWorkflowPhaseTree, navigateWorkflowPhaseTree, preserveWorkflowPhaseTreeSelection, workflowPhaseTreeInitialExpanded } from "./host-phases.js";
 import { type WorkflowRecoveryContext, type createWorkflowRecovery } from "./host-recovery.js";
 import { runDependencyIds } from "./retention.js";
@@ -124,6 +124,43 @@ export function workflowKeyLabel(keybindings: unknown, binding: string, fallback
   return [...new Set(vim ? [...configured, vim] : configured)].join("/");
 }
 
+/**
+ * A yes/no question drawn inside a navigator dashboard. Pi's confirm dialog replaces a custom component and afterwards
+ * restores the editor rather than the component, which leaves the dashboard's promise pending and the session waiting on it.
+ */
+export function createInlineConfirm(requestRender: () => void) {
+  let pending: { readonly title: string; readonly message: string; yes: boolean; readonly resolve: (value: boolean) => void } | undefined;
+  const answer = (value: boolean): void => {
+    const current = pending;
+    pending = undefined;
+    current?.resolve(value);
+    requestRender();
+  };
+  return {
+    ask(title: string, message: string): Promise<boolean> {
+      answer(false);
+      return new Promise<boolean>((resolve) => { pending = { title, message, yes: true, resolve }; requestRender(); });
+    },
+    active(): boolean { return pending !== undefined; },
+    rows(width: number, styles: WorkflowProgressStyles): string[] {
+      if (!pending) return [];
+      const yes = pending.yes;
+      const message = truncateToVisualLines(pending.message, Number.MAX_SAFE_INTEGER, Math.max(1, width), 0).visualLines.map((line) => line.trimEnd());
+      return [styles.bold(pending.title), ...message, ...["Yes", "No"].map((option) => (option === "Yes") === yes ? `→ ${styles.accent(option)}` : `  ${option}`)];
+    },
+    hint(keybindings: unknown): string {
+      return `${workflowKeyLabel(keybindings, "tui.select.up", "↑")}/${workflowKeyLabel(keybindings, "tui.select.down", "↓")} select · ${workflowKeyLabel(keybindings, "tui.select.confirm", "enter")} confirm · ${workflowKeyLabel(keybindings, "tui.select.cancel", "esc")} cancel`;
+    },
+    handleInput(keybindings: WorkflowKeybindings, data: string): void {
+      if (!pending) return;
+      if (workflowKeyMatches(keybindings, data, "tui.select.up") || workflowKeyMatches(keybindings, data, "tui.select.down")) { pending.yes = !pending.yes; requestRender(); }
+      else if (workflowKeyMatches(keybindings, data, "tui.select.confirm")) answer(pending.yes);
+      else if (workflowKeyMatches(keybindings, data, "tui.select.cancel")) answer(false);
+    },
+    cancel(): void { answer(false); },
+  };
+}
+
 export type WorkflowNavigatorDependencies = {
   pi: Pick<ExtensionAPI, "registerCommand">;
   home: string | undefined;
@@ -190,7 +227,7 @@ export function registerWorkflowNavigator(deps: WorkflowNavigatorDependencies): 
         const setStatus = uiHostCapabilities(ctx.ui)?.setStatus;
         setStatus?.call(ctx.ui, "workflow-stop", text);
       };
-      const runAction = async (actionCommand: string, status: (text: string | undefined) => void = setWorkflowStatus): Promise<"dashboard" | "picker" | "stopped"> => {
+      const runAction = async (actionCommand: string, status: (text: string | undefined) => void = setWorkflowStatus, confirm: (title: string, message: string) => Promise<boolean> = (title, message) => confirmWithBlocked(ctx.ui, reportBlocked, title, message)): Promise<"dashboard" | "picker" | "stopped"> => {
         const [action, runId, ...rest] = actionCommand.split(/\s+/);
         try {
           const run = runId ? runs.get(runId) : undefined;
@@ -264,7 +301,7 @@ export function registerWorkflowNavigator(deps: WorkflowNavigatorDependencies): 
           }
           if (action === "stop" && run) {
             const workflowName = stored?.loaded.run.workflowName ?? run.metadata.name;
-            if (!await confirmWithBlocked(ctx.ui, reportBlocked, "Stop workflow?", `Stop workflow ${workflowName} (${run.store.runId})? This cannot be undone.`)) return "dashboard";
+            if (!await confirm("Stop workflow?", `Stop workflow ${workflowName} (${run.store.runId})? This cannot be undone.`)) return "dashboard";
             status(`Stopping workflow ${workflowName}...`);
             await stopWorkflowRun(run.store.runId);
             status(`Workflow ${run.store.runId} stopped.`);
@@ -556,6 +593,12 @@ export function registerWorkflowNavigator(deps: WorkflowNavigatorDependencies): 
                   let expandedNodeIds = new Set(workflowPhaseTreeInitialExpanded(tree));
                   const terminalRows = () => Math.max(1, tuiRows(tui) - WORKFLOW_PANEL_FOOTER_ROWS);
                   const keyLabel = (binding: string, fallback: string) => workflowKeyLabel(keybindings, binding, fallback);
+                  const inlineConfirm = createInlineConfirm(() => { if (!disposed) tui.requestRender(); });
+                  const confirmInDashboard = async (title: string, message: string): Promise<boolean> => {
+                    reportBlocked?.(true, title);
+                    try { return await inlineConfirm.ask(title, message); }
+                    finally { reportBlocked?.(false); }
+                  };
                   const progressNow = () => {
                     const now = Date.now();
                     if (hardTerminalRunStates.has(view.run.state)) {
@@ -629,7 +672,7 @@ export function registerWorkflowNavigator(deps: WorkflowNavigatorDependencies): 
                       stopStatus = status;
                       setWorkflowStatus(status);
                       if (!disposed) tui.requestRender();
-                    }).then(async (outcome) => {
+                    }, confirmInDashboard).then(async (outcome) => {
                       if (outcome === "stopped") { done("__stopped__"); return; }
                       await updateDashboard();
                     }).catch((error: unknown) => {
@@ -662,7 +705,8 @@ export function registerWorkflowNavigator(deps: WorkflowNavigatorDependencies): 
                       const content = [...statusLines, ...phaseLines];
                       const rows = terminalRows();
                       const hintRows = rows >= 3 ? 1 : 0;
-                      const viewport = Math.max(1, rows - hintRows);
+                      const confirmRows = inlineConfirm.rows(width, styles);
+                      const viewport = Math.max(1, rows - hintRows - confirmRows.length);
                       const maxOffset = Math.max(0, content.length - viewport);
                       dashboardOffset = Math.max(0, Math.min(maxOffset, dashboardOffset));
                       if (actionMode) {
@@ -683,11 +727,12 @@ export function registerWorkflowNavigator(deps: WorkflowNavigatorDependencies): 
                       dashboardOffset = Math.max(0, Math.min(maxOffset, dashboardOffset));
                       const selectedNode = selectedNodeId ? tree.byId.get(selectedNodeId) : undefined;
                       const enterAction = selectedNode?.kind === "workflow" ? "run actions" : selectedNode?.kind === "agent" ? "agent actions" : selectedNode?.children.length ? "expand/collapse" : narrow ? "inspect" : "focus details";
-                      const hint = truncateToVisualLines(theme.fg("dim", actionMode ? `${keyLabel("tui.select.up", "↑")}/${keyLabel("tui.select.down", "↓")} actions · ${keyLabel("tui.select.confirm", "enter")} run · ${keyLabel("tui.editor.cursorLeft", "←")} tree · ${keyLabel("tui.select.cancel", "esc")} tree` : `${keyLabel("tui.select.up", "↑")}/${keyLabel("tui.select.down", "↓")} tree · ${keyLabel("tui.editor.cursorLeft", "←")}/${keyLabel("tui.editor.cursorRight", "→")} collapse/expand · ${keyLabel("tui.select.confirm", "enter")} ${enterAction} · a actions · ${keyLabel("tui.select.cancel", "esc")} ${narrow && detailsMode ? "tree" : "back"}${content.length > viewport ? ` · ${keyLabel("tui.select.pageUp", "pgup")}/${keyLabel("tui.select.pageDown", "pgdn")} scroll` : ""} · auto-refresh 1s`), Number.MAX_SAFE_INTEGER, width, 1).visualLines[0] ?? "";
-                      return [...content.slice(dashboardOffset, dashboardOffset + viewport), ...(hintRows ? [hint] : [])];
+                      const hint = truncateToVisualLines(theme.fg("dim", inlineConfirm.active() ? inlineConfirm.hint(keybindings) : actionMode ? `${keyLabel("tui.select.up", "↑")}/${keyLabel("tui.select.down", "↓")} actions · ${keyLabel("tui.select.confirm", "enter")} run · ${keyLabel("tui.editor.cursorLeft", "←")} tree · ${keyLabel("tui.select.cancel", "esc")} tree` : `${keyLabel("tui.select.up", "↑")}/${keyLabel("tui.select.down", "↓")} tree · ${keyLabel("tui.editor.cursorLeft", "←")}/${keyLabel("tui.editor.cursorRight", "→")} collapse/expand · ${keyLabel("tui.select.confirm", "enter")} ${enterAction} · a actions · ${keyLabel("tui.select.cancel", "esc")} ${narrow && detailsMode ? "tree" : "back"}${content.length > viewport ? ` · ${keyLabel("tui.select.pageUp", "pgup")}/${keyLabel("tui.select.pageDown", "pgdn")} scroll` : ""} · auto-refresh 1s`), Number.MAX_SAFE_INTEGER, width, 1).visualLines[0] ?? "";
+                      return [...content.slice(dashboardOffset, dashboardOffset + viewport), ...confirmRows, ...(hintRows ? [hint] : [])];
                     },
                     invalidate() {},
                     handleInput(data: string) {
+                      if (inlineConfirm.active()) { inlineConfirm.handleInput(keybindings, data); return; }
                       if (stopRequested || editorRunning) return;
                       const narrow = renderedWidth < 80;
                       if (!actionMode && (data === "a" || data === "A")) { actionMode = true; actionIndex = 0; dashboardOffset = 0; tui.requestRender(); return; }
@@ -776,7 +821,7 @@ export function registerWorkflowNavigator(deps: WorkflowNavigatorDependencies): 
                       }
                       tui.requestRender();
                     },
-                    dispose() { disposed = true; stopTimer(); setWorkflowStatus(undefined); },
+                    dispose() { disposed = true; stopTimer(); setWorkflowStatus(undefined); inlineConfirm.cancel(); },
                   };
                 })
               : await ctx.ui.select(view.dashboard, [...view.actions.keys(), "Back"]);

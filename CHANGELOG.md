@@ -8,6 +8,10 @@
 - Background subagents appear below the editor in the workflow widget's frame, one row per run with model, tokens, cost, elapsed time, and quiet or stalled warnings, and each leaves a receipt in the transcript when it settles, like a background workflow run.
 - The `subagents_run` result header shows tokens and cost, like the workflow header.
 
+### Fixes
+
+- Declining the Stop confirmation in the `/workflow` dashboard no longer leaves Pi stuck. Pi's confirm dialog replaced the dashboard and then restored the editor, so the `/workflow` command never finished: later messages and extension commands such as `/subagents` queued without running, and the workflow widget stayed hidden. The question now appears inside the dashboard, as in `/subagents`; declining keeps the dashboard open on the action menu.
+
 ## [5.16.3] - 2026-09-23
 
 ### Fixes

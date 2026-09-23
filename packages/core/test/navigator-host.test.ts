@@ -354,7 +354,7 @@ void test("TUI navigator exposes agent-scoped worktree actions without transcrip
   await store.delete(true);
 });
 
-void test("navigator stop asks for confirmation before cancelling", async () => {
+void test("navigator stop asks for confirmation inside the dashboard and keeps it open when declined", async () => {
   const home = mkdtempSync(join(tmpdir(), "pi-extensible-workflows-stop-confirm-"));
   const cwd = join(home, "project");
   const store = new RunStore(cwd, "session", "run", home);
@@ -363,7 +363,8 @@ void test("navigator stop asks for confirmation before cancelling", async () => 
   await store.saveOwnership([{ id: "run:1", label: "worker", state: "running", options: { label: "worker", cwd, tools: [] } }]);
   let start: ((event: unknown, ctx: unknown) => Promise<void>) | undefined;
   const commands: Array<{ handler: (args: string, ctx: unknown) => Promise<void> }> = [];
-  const confirmations: string[] = [];
+  let dialogCalls = 0;
+  let dashboard: { render(width: number): string[]; handleInput?(data: string): void } | undefined;
   const blockedEvents: unknown[] = [];
   let customCalls = 0;
   let pickerCalls = 0;
@@ -374,7 +375,8 @@ void test("navigator stop asks for confirmation before cancelling", async () => 
   const ctx = {
     cwd, mode: "tui", hasUI: true, model: { provider: "openai", id: "gpt" }, sessionManager: { getSessionId: () => "session" },
     ui: {
-      notify() {}, setStatus() {}, confirm: async (_title: string, message: string) => { confirmations.push(message); return false; },
+      // Pi's dialog would replace the dashboard and restore the editor, leaving the command pending.
+      notify() {}, setStatus() {}, confirm: async () => { dialogCalls += 1; return false; },
       select: async (prompt: string, options: string[]) => { if (prompt === "Workflow actions") return "Stop"; if (prompt !== "Workflows\n") return options[0] ?? "Close"; pickerCalls += 1; return pickerCalls === 1 ? options[0] ?? "Close" : "Close"; },
       custom: async (factory: (tui: { requestRender(): void }, theme: { fg(color: string, text: string): string }, keybindings: { matches(data: string, binding: string): boolean }, done: (value?: string) => void) => { render(width: number): string[]; handleInput?(data: string): void; dispose?(): void }, options?: { overlay?: boolean; overlayOptions?: { width?: string; maxHeight?: string } }) => {
         customCalls += 1;
@@ -385,6 +387,7 @@ void test("navigator stop asks for confirmation before cancelling", async () => 
         const completed = new Promise<string | undefined>((resolve) => { resolveCustom = resolve; });
         const component = factory({ requestRender() {} }, { fg: (_color, text) => text }, { matches: (data, binding) => data === binding }, (value) => { disposed = true; result = value; resolveCustom(value); });
         closeNavigator = () => component.handleInput?.("tui.select.cancel");
+        dashboard = component;
         if (customCalls === 1) { component.handleInput?.("a"); component.handleInput?.("tui.select.down"); component.handleInput?.("tui.select.confirm"); } else component.handleInput?.("tui.select.cancel");
         await completed;
         component.dispose?.();
@@ -396,10 +399,17 @@ void test("navigator stop asks for confirmation before cancelling", async () => 
   assert.ok(command);
   await start({}, ctx);
   const pending = executeCommand(command.handler, "", ctx);
-  for (let attempt = 0; attempt < 100 && confirmations.length === 0; attempt += 1) await new Promise((resolve) => setTimeout(resolve, 10));
-  assert.equal(confirmations.length, 1);
-  assert.match(confirmations[0] ?? "", /live|run/);
+  const screen = () => dashboard?.render(120).join("\n") ?? "";
+  for (let attempt = 0; attempt < 100 && !screen().includes("Stop workflow?"); attempt += 1) await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.match(screen(), /Stop workflow\?\nStop workflow live \(run\)\? This cannot be undone\.\n→ Yes\n {2}No\n/);
+  assert.deepEqual(blockedEvents, [{ active: true, label: "Stop workflow?" }]);
+  dashboard?.handleInput?.("tui.select.down");
+  dashboard?.handleInput?.("tui.select.confirm");
+  for (let attempt = 0; attempt < 100 && blockedEvents.length < 2; attempt += 1) await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.doesNotMatch(screen(), /Stop workflow\?/);
+  assert.match(screen(), /Run actions/, "declining keeps the dashboard and its action menu");
   assert.equal(disposed, false);
+  assert.equal(dialogCalls, 0);
   await new Promise((resolve) => setTimeout(resolve, 10));
   for (let attempt = 0; attempt < 20; attempt += 1) { closeNavigator(); await new Promise((resolve) => setTimeout(resolve, 10)); }
   await pending;
@@ -423,7 +433,8 @@ void test("navigator stop stays visible through cleanup, then closes", async () 
   const isCleanupStarted = () => cleanupStarted;
   let start: ((event: unknown, ctx: unknown) => Promise<void>) | undefined;
   const commands: Array<{ handler: (args: string, ctx: unknown) => Promise<void> }> = [];
-  const confirmations: string[] = [];
+  let dialogCalls = 0;
+  let question = "";
   const statuses: Array<string | undefined> = [];
   const notices: string[] = [];
   let componentDisposed = false;
@@ -434,7 +445,7 @@ void test("navigator stop stays visible through cleanup, then closes", async () 
   const ctx = {
     cwd, mode: "tui", hasUI: true, model: { provider: "openai", id: "gpt" }, sessionManager: { getSessionId: () => "session" },
     ui: {
-      notify(message: string) { notices.push(message); }, setStatus(_key: string, text: string | undefined) { statuses.push(text); }, confirm: async (_title: string, message: string) => { confirmations.push(message); return true; },
+      notify(message: string) { notices.push(message); }, setStatus(_key: string, text: string | undefined) { statuses.push(text); }, confirm: async () => { dialogCalls += 1; return true; },
       select: async (prompt: string, options: string[]) => { if (prompt === "Workflow actions") return "Stop"; if (prompt !== "Workflows\n") return options[0] ?? "Close"; pickerCalls += 1; return pickerCalls === 1 ? options[0] ?? "Close" : "Close"; },
       custom: async (factory: (tui: { requestRender(): void }, theme: { fg(color: string, text: string): string }, keybindings: { matches(data: string, binding: string): boolean }, done: (value?: string) => void) => { render(width: number): string[]; handleInput?(data: string): void; dispose?(): void }, options?: { overlay?: boolean }) => {
         assert.equal(options?.overlay, undefined);
@@ -442,7 +453,13 @@ void test("navigator stop stays visible through cleanup, then closes", async () 
         let resolveCustom!: (value: string | undefined) => void;
         const completed = new Promise<string | undefined>((resolve) => { resolveCustom = resolve; });
         const component = factory({ requestRender() { rendered = component.render(200).join("\n"); } }, { fg: (_color, text) => text }, { matches: (data, binding) => data === binding }, (value) => { componentDisposed = true; result = value; resolveCustom(value); });
-        if (componentDisposed) component.handleInput?.("tui.select.cancel"); else { component.handleInput?.("a"); component.handleInput?.("tui.select.down"); component.handleInput?.("tui.select.confirm"); component.handleInput?.("tui.select.confirm"); }
+        if (componentDisposed) component.handleInput?.("tui.select.cancel");
+        else {
+          component.handleInput?.("a"); component.handleInput?.("tui.select.down"); component.handleInput?.("tui.select.confirm");
+          for (let attempt = 0; attempt < 100 && !component.render(200).join("\n").includes("Stop workflow?"); attempt += 1) await new Promise((resolve) => setTimeout(resolve, 10));
+          question = component.render(200).join("\n");
+          component.handleInput?.("tui.select.confirm");
+        }
         await completed;
         component.dispose?.();
         return result;
@@ -460,7 +477,8 @@ void test("navigator stop stays visible through cleanup, then closes", async () 
   assert.equal(isCleanupStarted(), true);
   assert.equal(componentDisposed, false);
   assert.match(rendered, /Stopping workflow live/);
-  assert.equal(confirmations.length, 1);
+  assert.match(question, /Stop workflow live \(run\)\? This cannot be undone\./);
+  assert.equal(dialogCalls, 0);
   assert.equal((await store.load()).run.state, "stopped");
   releaseCleanup();
   await Promise.race([pending, new Promise<never>((_resolve, reject) => setTimeout(() => { reject(new Error("navigator did not close after stop")); }, 1_000))]);
@@ -1188,7 +1206,7 @@ void test("navigator stop reports cleanup failures without closing unexpectedly"
   const ctx = {
     cwd, mode: "tui", hasUI: true, model: { provider: "openai", id: "gpt" }, sessionManager: { getSessionId: () => "session" },
     ui: {
-      notify(message: string) { notices.push(message); }, setStatus(_key: string, text: string | undefined) { statuses.push(text); }, confirm: async () => true,
+      notify(message: string) { notices.push(message); }, setStatus(_key: string, text: string | undefined) { statuses.push(text); }, confirm: async () => { throw new Error("the dashboard confirms in place"); },
       select: async (prompt: string, options: string[]) => { if (prompt === "Workflow actions") return "Stop"; if (prompt !== "Workflows\n") return options[0] ?? "Close"; pickerCalls += 1; return pickerCalls === 1 ? options[0] ?? "Close" : "Close"; },
       custom: async (factory: (tui: { requestRender(): void }, theme: { fg(color: string, text: string): string }, keybindings: { matches(data: string, binding: string): boolean }, done: (value?: string) => void) => { render(width: number): string[]; handleInput?(data: string): void; dispose?(): void }, options?: { overlay?: boolean }) => {
         customCalls += 1;
@@ -1198,7 +1216,12 @@ void test("navigator stop reports cleanup failures without closing unexpectedly"
         const completed = new Promise<string | undefined>((resolve) => { resolveCustom = resolve; });
         const component = factory({ requestRender() { rendered = component.render(200).join("\n"); } }, { fg: (_color, text) => text }, { matches: (data, binding) => data === binding }, (value) => { componentDisposed = true; result = value; resolveCustom(value); });
         closeNavigator = () => component.handleInput?.("tui.select.cancel");
-        if (componentDisposed) component.handleInput?.("tui.select.cancel"); else { component.handleInput?.("a"); component.handleInput?.("tui.select.down"); component.handleInput?.("tui.select.confirm"); }
+        if (componentDisposed) component.handleInput?.("tui.select.cancel");
+        else {
+          component.handleInput?.("a"); component.handleInput?.("tui.select.down"); component.handleInput?.("tui.select.confirm");
+          for (let attempt = 0; attempt < 100 && !component.render(200).join("\n").includes("Stop workflow?"); attempt += 1) await new Promise((resolve) => setTimeout(resolve, 10));
+          component.handleInput?.("tui.select.confirm");
+        }
         await completed;
         component.dispose?.();
         return result;

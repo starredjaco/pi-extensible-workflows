@@ -1,8 +1,8 @@
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
-import { copyToClipboard, getAgentDir, SettingsManager, truncateToVisualLines, type ExtensionAPI, type ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
+import { copyToClipboard, getAgentDir, SettingsManager, type ExtensionAPI, type ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import { Editor, truncateToWidth, type EditorTheme } from "@earendil-works/pi-tui";
-import { agentActionLabels, deepFreeze, errorText, formatAgentDetail, formatAgentError, formatCost, formatNavigatorColumns, formatWorkflowRuntime, jsonValue, loadingRegistry, navigatorAttentionSortByState, openWorkflowArtifact, PLAIN_WORKFLOW_PROGRESS_STYLES, progressStyleForState, runStateGlyph, themeWorkflowProgressStyles, visibleStandaloneAgentAttemptActions, workflowKeyLabel, workflowKeyMatches, workflowPromptArtifact, workflowResultArtifact, type AgentAttemptSummary, type AgentDetailPresentation, type StandaloneAgentAttemptActionContext, type WorkflowArtifact, type WorkflowProgressStyles } from "../../src/index.js";
+import { agentActionLabels, createInlineConfirm, deepFreeze, errorText, formatAgentDetail, formatAgentError, formatCost, formatNavigatorColumns, formatWorkflowRuntime, jsonValue, loadingRegistry, navigatorAttentionSortByState, openWorkflowArtifact, PLAIN_WORKFLOW_PROGRESS_STYLES, progressStyleForState, runStateGlyph, themeWorkflowProgressStyles, visibleStandaloneAgentAttemptActions, workflowKeyLabel, workflowKeyMatches, workflowPromptArtifact, workflowResultArtifact, type AgentAttemptSummary, type AgentDetailPresentation, type StandaloneAgentAttemptActionContext, type WorkflowArtifact, type WorkflowProgressStyles } from "../../src/index.js";
 import { normalizeSubagentRunRequest, type SubagentManager, type SubagentManagerContext, type SubagentProgress, type SubagentRunRequest, type SubagentStatus } from "./contracts.js";
 import { attemptValue, statusValue } from "./decode.js";
 const MAX_DETAIL_TEXT = 4000;
@@ -354,17 +354,8 @@ async function showDashboard(manager: SubagentManager, storageDirectory: string,
     let actionMode = false;
     let actionIndex = 0;
     let steerMode = false;
-    // Pi's confirm dialog replaces this component and restores the editor, not the dashboard, so confirmations render in place.
-    let confirmation: { readonly title: string; readonly message: string; yes: boolean; readonly resolve: (value: boolean) => void } | undefined;
-    const confirmInline: Confirm = (title, message) => new Promise((resolve) => {
-      confirmation = { title, message, yes: true, resolve };
-      requestRender();
-    });
-    const answer = (value: boolean): void => {
-      const pending = confirmation;
-      confirmation = undefined;
-      pending?.resolve(value);
-    };
+    const inlineConfirm = createInlineConfirm(() => { if (!disposed) tui.requestRender(); });
+    const confirmInline: Confirm = (title, message) => inlineConfirm.ask(title, message);
     let actionRunning = false;
     let refreshing = false;
     let disposed = false;
@@ -462,7 +453,7 @@ async function showDashboard(manager: SubagentManager, storageDirectory: string,
       disposed = true;
       generation += 1;
       stopTimer();
-      answer(false);
+      inlineConfirm.cancel();
     };
     const close = (value: DashboardResult): void => {
       if (disposed) return;
@@ -509,9 +500,7 @@ async function showDashboard(manager: SubagentManager, storageDirectory: string,
         const menu: DetailMenu = actionMode ? { options: actions, index: actionIndex } : steerMode ? undefined : "hint";
         const layout = narrow ? detailsMode || actionMode || steerMode ? { detailsOnly: true } : { treeOnly: true } : {};
         const content = [...headerRows(entries, styles), ...formatNavigatorColumns(listRows(entries, inspection.entry.status.id, styles), detailRows(inspection, styles, menu), width, layout)];
-        const footer = steerMode ? [styles.bold("Steer subagent"), ...steerEditor.render(width)]
-          : confirmation ? [styles.bold(confirmation.title), ...truncateToVisualLines(confirmation.message, Number.MAX_SAFE_INTEGER, Math.max(1, width), 0).visualLines.map((line) => line.trimEnd()), ...["Yes", "No"].map((option) => (option === "Yes") === confirmation?.yes ? `→ ${styles.accent(option)}` : `  ${option}`)]
-            : [];
+        const footer = steerMode ? [styles.bold("Steer subagent"), ...steerEditor.render(width)] : inlineConfirm.rows(width, styles);
         const rows = Math.max(1, tuiRows(tui) - DASHBOARD_FOOTER_ROWS);
         const hintRows = rows >= 3 ? 1 : 0;
         const viewport = Math.max(1, rows - hintRows - footer.length);
@@ -535,7 +524,7 @@ async function showDashboard(manager: SubagentManager, storageDirectory: string,
         const refreshHint = timer === undefined ? "" : " · auto-refresh 1s";
         const back = narrow && detailsMode ? "details" : "list";
         const hint = steerMode ? "enter submit · esc back"
-          : confirmation ? `${up}/${down} select · ${enter} confirm · ${esc} cancel`
+          : inlineConfirm.active() ? inlineConfirm.hint(keybindings)
           : actionMode ? `${up}/${down} actions · ${enter} run · ${keyLabel("tui.editor.cursorLeft", "←")} ${back} · ${esc} ${back}`
             : narrow && detailsMode ? `${up}/${down} scroll · ${enter} actions · a actions · ${esc} list${scroll}${refreshHint}`
               : `${up}/${down} select · ${enter} ${narrow ? "details" : "actions"} · a actions · ${esc} close${scroll}${refreshHint}`;
@@ -544,13 +533,7 @@ async function showDashboard(manager: SubagentManager, storageDirectory: string,
       invalidate() {},
       handleInput(data: string) {
         if (disposed) return;
-        if (confirmation) {
-          if (matches(data, "tui.select.up") || matches(data, "tui.select.down")) confirmation.yes = !confirmation.yes;
-          else if (matches(data, "tui.select.confirm")) answer(confirmation.yes);
-          else if (matches(data, "tui.select.cancel")) answer(false);
-          requestRender();
-          return;
-        }
+        if (inlineConfirm.active()) { inlineConfirm.handleInput(keybindings, data); return; }
         if (actionRunning) return;
         if (steerMode) {
           if (keybindings.matches(data, "tui.select.cancel")) { steerMode = false; actionMode = true; steerEditor.setText(""); }
