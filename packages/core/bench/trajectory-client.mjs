@@ -210,6 +210,10 @@ for (let attempt = 0; attempt < 200; attempt += 1) {
 await delay(Number(process.env.BENCH_SETTLE_MS ?? 1500));
 
 await page.evaluate("(() => { const original = JSON.parse; window.__parsedBytes = 0; JSON.parse = (text, reviver) => { if (typeof text === 'string') window.__parsedBytes += text.length; return original(text, reviver); }; return true; })()");
+if (process.env.BENCH_HIDDEN === "1") {
+  await page.evaluate("(() => { Object.defineProperty(document, 'hidden', { configurable: true, get: () => true }); document.dispatchEvent(new Event('visibilitychange')); return true; })()");
+  await delay(1500);
+}
 await page.command("Profiler.enable");
 await page.command("Profiler.setSamplingInterval", { interval: 200 });
 await page.command("Profiler.start");
@@ -222,6 +226,7 @@ const summary = summarize(stopped.result.profile);
 const renders = await page.evaluate("document.querySelectorAll('#swim-content .bar').length");
 const toolBars = await page.evaluate("document.querySelectorAll('#swim-content .bar.tool').length");
 const runningBarWidth = await page.evaluate("document.querySelector('#swim-content .bar.spin')?.style.width ?? null");
+const spinner = await page.evaluate("(() => { const node = document.querySelector('#swim-content .g-run.spin'); if (!node) return null; const style = getComputedStyle(node, '::before'); return `${style.content} ${style.animationName} ${style.animationDuration}`; })()");
 const axisLabels = await page.evaluate("[...document.querySelectorAll('#swim-content .axis .ticks span')].map((node) => node.textContent).join(' | ')");
 let switchedToolBars;
 if (process.env.BENCH_SWITCH === "1" && RUNS > 1) {
@@ -231,7 +236,7 @@ if (process.env.BENCH_SWITCH === "1" && RUNS > 1) {
 }
 
 console.log(JSON.stringify({
-  config: { runs: RUNS, agents: AGENTS, timingEntriesPerAgent: TIMINGS, logs: LOGS, seconds: SECONDS, view: VIEW, focusRun, ganttBars: renders, ganttToolBars: toolBars, runningBarWidth, axisLabels, ...(switchedToolBars === undefined ? {} : { toolBarsAfterRunSwitch: switchedToolBars }) },
+  config: { runs: RUNS, agents: AGENTS, timingEntriesPerAgent: TIMINGS, logs: LOGS, seconds: SECONDS, view: VIEW, focusRun, ganttBars: renders, ganttToolBars: toolBars, runningBarWidth, axisLabels, spinner, ...(switchedToolBars === undefined ? {} : { toolBarsAfterRunSwitch: switchedToolBars }) },
   parsedKBPerSecond: Number((Number(parsedBytes ?? 0) / 1024 / SECONDS).toFixed(0)),
   statePayloadKB: Number((frameBytes / 1024).toFixed(0)),
   busyMsPerSecond: Number(((summary.totalMs - (summary.ranked.find(({ name }) => name.startsWith("(idle)"))?.ms ?? 0)) / SECONDS).toFixed(1)),

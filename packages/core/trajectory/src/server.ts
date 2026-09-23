@@ -10,7 +10,7 @@ const TRAJECTORY_IDLE_EXIT_MS = 5 * 60 * 1000;
 type Socket = import("node:stream").Duplex;
 type ClientKind = "publisher" | "browser";
 type RunFocus = { publisherId: string; runId: string };
-type Client = { socket: Socket; kind: ClientKind; publisherId?: string; buffer: Buffer; pendingState: Buffer | undefined; backpressured: boolean; superseded: boolean; focusAware?: boolean; focus?: RunFocus };
+type Client = { socket: Socket; kind: ClientKind; publisherId?: string; buffer: Buffer; pendingState: Buffer | undefined; pendingDeliver: (() => void) | undefined; backpressured: boolean; superseded: boolean; focusAware?: boolean; focus?: RunFocus; sentTiming?: Map<string, number> };
 type State = { type: "state"; publishers: readonly unknown[]; updatedAt: number; initial?: boolean; truncated?: boolean };
 type PendingRequest = { requestId: string; kind: "transcript" | "action"; browser: Client; publisherId: string; publisher: Client; target: { runId?: string; agentId?: string; subagentId?: string; revision?: number }; timer: ReturnType<typeof setTimeout> };
 const MAX_FRAME_BYTES = 32 * 1024 * 1024;
@@ -48,8 +48,30 @@ function withoutTiming(run: unknown): unknown {
   for (const [id, entry] of Object.entries(record.transcripts as Record<string, unknown>)) transcripts[id] = entry && typeof entry === "object" && !Array.isArray(entry) ? { ...entry, timing: [] } : entry;
   return { ...record, transcripts };
 }
+/** Timing already delivered at this revision is omitted; the browser keeps the entries it cached. */
+function knownTiming(run: unknown, prefix: string, sent: Map<string, number>, mark: (key: string, revision: number) => void): unknown {
+  if (!run || typeof run !== "object" || Array.isArray(run)) return run;
+  const record = run as { transcripts?: unknown };
+  if (!record.transcripts || typeof record.transcripts !== "object" || Array.isArray(record.transcripts)) return run;
+  const transcripts: Record<string, unknown> = {};
+  for (const [id, entry] of Object.entries(record.transcripts as Record<string, unknown>)) {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) { transcripts[id] = entry; continue; }
+    const value = entry as { revision?: unknown; timing?: unknown };
+    if (typeof value.revision !== "number" || !Array.isArray(value.timing)) { transcripts[id] = entry; continue; }
+    if (sent.get(`${prefix}\t${id}`) === value.revision) { const rest = { ...value }; delete rest.timing; transcripts[id] = rest; continue; }
+    mark(`${prefix}\t${id}`, value.revision);
+    transcripts[id] = entry;
+  }
+  return { ...record, transcripts };
+}
+function forgetTiming(run: unknown, prefix: string, sent: Map<string, number>): void {
+  if (!run || typeof run !== "object" || Array.isArray(run)) return;
+  const record = run as { transcripts?: unknown };
+  if (!record.transcripts || typeof record.transcripts !== "object" || Array.isArray(record.transcripts)) return;
+  for (const id of Object.keys(record.transcripts)) sent.delete(`${prefix}\t${id}`);
+}
 /** Tool-timing only drives the focused run's gantt, so every other run ships without it. */
-function focusedState(state: State, focus: RunFocus | undefined): State {
+function focusedState(state: State, focus: RunFocus | undefined, sent?: Map<string, number>, mark: (key: string, revision: number) => void = () => {}): State {
   return {
     ...state,
     publishers: state.publishers.map((publisher) => {
@@ -60,7 +82,9 @@ function focusedState(state: State, focus: RunFocus | undefined): State {
       const focusedPublisher = focus !== undefined && value.id === focus.publisherId;
       return { ...value, runs: runs.map((run) => {
         const id = run && typeof run === "object" && !Array.isArray(run) ? (run as { run?: { id?: unknown } }).run?.id : undefined;
-        return focusedPublisher && id === focus.runId ? run : withoutTiming(run);
+        const prefix = `${String(value.id)}\t${String(id)}`;
+        if (!focusedPublisher || id !== focus.runId) { if (sent) forgetTiming(run, prefix, sent); return withoutTiming(run); }
+        return sent ? knownTiming(run, prefix, sent, mark) : run;
       }) };
     }),
   };
@@ -159,11 +183,13 @@ function isState(value: unknown): value is State {
   return Boolean(value && typeof value === "object" && !Array.isArray(value) && (value as { type?: unknown }).type === "state");
 }
 
-function writeFrame(client: Client, packet: Buffer, state: boolean): void {
-  if (state && client.backpressured) { client.pendingState = packet; return; }
+function writeFrame(client: Client, packet: Buffer, state: boolean, onDelivered?: () => void): void {
+  // A superseded pending frame is never sent, so its payload must not count as delivered.
+  if (state && client.backpressured) { client.pendingState = packet; client.pendingDeliver = onDelivered; return; }
   try {
-    if (state) client.pendingState = undefined;
+    if (state) { client.pendingState = undefined; client.pendingDeliver = undefined; }
     if (!client.socket.write(packet)) client.backpressured = true;
+    onDelivered?.();
   } catch { client.socket.destroy(); }
 }
 
@@ -260,16 +286,18 @@ export function createTrajectoryServer(port: number, lockPath: string, options: 
   const broadcast = (value: unknown) => {
     if (isState(value)) {
       try {
-        const frames = new Map<string, Buffer>();
+        let shared: Buffer | undefined;
         for (const client of clients) {
           if (client.kind !== "browser") continue;
-          const key = client.focusAware === true ? `${client.focus?.publisherId ?? ""}\t${client.focus?.runId ?? ""}` : "*";
-          let stateFrame = frames.get(key);
-          if (!stateFrame) {
-            stateFrame = frame(encodeState(client.focusAware === true ? focusedState(value, client.focus) : value, maxFrameBytes), maxFrameBytes);
-            frames.set(key, stateFrame);
+          if (client.focusAware !== true) {
+            shared ??= frame(encodeState(value, maxFrameBytes), maxFrameBytes);
+            writeFrame(client, shared, true);
+            continue;
           }
-          writeFrame(client, stateFrame, true);
+          const sent = (client.sentTiming ??= new Map<string, number>());
+          const marks: [string, number][] = [];
+          const stateFrame = frame(encodeState(focusedState(value, client.focus, sent, (key, revision) => marks.push([key, revision])), maxFrameBytes), maxFrameBytes);
+          writeFrame(client, stateFrame, true, () => { for (const [key, revision] of marks) sent.set(key, revision); });
         }
       } catch {
         for (const client of clients) if (client.kind === "browser") client.socket.destroy();
@@ -277,6 +305,14 @@ export function createTrajectoryServer(port: number, lockPath: string, options: 
       return;
     }
     for (const client of clients) if (client.kind === "browser") emit(client, value);
+  };
+  let viewers = 0;
+  // Publishers poll their run directory, so they only need a fast cadence while a browser is watching.
+  const notifyViewers = () => {
+    const count = [...clients].filter((candidate) => candidate.kind === "browser").length;
+    if (count === viewers) return;
+    viewers = count;
+    for (const candidate of clients) if (candidate.kind === "publisher") emit(candidate, { type: "publisher:viewers", count });
   };
   const publishState = () => {
     const values = [...publishers.values()].map(({ value, generation }) => ({ ...value, generation }));
@@ -286,6 +322,7 @@ export function createTrajectoryServer(port: number, lockPath: string, options: 
   const disconnect = (client: Client) => {
     clearPending(client, client.kind === "publisher" ? "Publisher is disconnected" : "Trajectory browser disconnected");
     clients.delete(client);
+    if (client.kind === "browser") notifyViewers();
     if (client.kind === "publisher" && client.publisherId && publishers.get(client.publisherId)?.client === client) {
       publishers.delete(client.publisherId);
       publishState();
@@ -299,14 +336,19 @@ export function createTrajectoryServer(port: number, lockPath: string, options: 
     const message = value as Record<string, unknown>;
     if (client.superseded) return;
     if (message.type === "publisher:detach" && client.kind === "publisher" && client.publisherId && publishers.get(client.publisherId)?.client === client) { clearPending(client, "Publisher is disconnected"); publishers.delete(client.publisherId); publishState(); scheduleIdleExit(); return; }
-    if (message.type === "ui:attach") { client.kind = "browser"; emit(client, latest); return; }
+    if (message.type === "ui:attach") { client.kind = "browser"; emit(client, latest); notifyViewers(); return; }
     if (message.type === "ui:focus" && client.kind === "browser") {
       const publisherId = typeof message.publisherId === "string" ? message.publisherId : undefined;
       const runId = typeof message.runId === "string" ? message.runId : undefined;
       client.focusAware = true;
+      client.sentTiming = new Map<string, number>();
       if (publisherId !== undefined && runId !== undefined) client.focus = { publisherId, runId };
       else delete client.focus;
-      emit(client, focusedState(latest, client.focus));
+      const sent = client.sentTiming;
+      const marks: [string, number][] = [];
+      const focused = focusedState(latest, client.focus, sent, (key, revision) => marks.push([key, revision]));
+      try { writeFrame(client, frame(encodeState(focused, maxFrameBytes), maxFrameBytes), true, () => { for (const [key, revision] of marks) sent.set(key, revision); }); }
+      catch { client.socket.destroy(); }
       return;
     }
     if (client.kind === "publisher" && message.type === "publisher:attach" && typeof message.publisherId === "string") {
@@ -321,6 +363,7 @@ export function createTrajectoryServer(port: number, lockPath: string, options: 
       }
       const generation = (previous?.generation ?? 0) + 1;
       publishers.set(message.publisherId, { client, value: { ...(previous?.value ?? { id: message.publisherId }), id: message.publisherId, connected: true }, generation });
+      emit(client, { type: "publisher:viewers", count: viewers });
       publishState();
       return;
     }
@@ -457,12 +500,14 @@ export function createTrajectoryServer(port: number, lockPath: string, options: 
     if (!authorized(request, port) || url.pathname !== "/ws" || typeof key !== "string") { socket.destroy(); return; }
     const accept = createHash("sha1").update(`${key}258EAFA5-E914-47DA-95CA-C5AB0DC85B11`).digest("base64");
     socket.write(`HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ${accept}\r\n\r\n`);
-    const client: Client = { socket, kind: "publisher", buffer: Buffer.alloc(0), pendingState: undefined, backpressured: false, superseded: false };
+    const client: Client = { socket, kind: "publisher", buffer: Buffer.alloc(0), pendingState: undefined, pendingDeliver: undefined, backpressured: false, superseded: false };
     socket.on("drain", () => {
       const pendingState = client.pendingState;
+      const pendingDeliver = client.pendingDeliver;
       client.pendingState = undefined;
+      client.pendingDeliver = undefined;
       client.backpressured = false;
-      if (pendingState !== undefined) writeFrame(client, pendingState, true);
+      if (pendingState !== undefined) writeFrame(client, pendingState, true, pendingDeliver);
     });
     clients.add(client);
     socket.on("data", (chunk: unknown) => {
@@ -471,6 +516,8 @@ export function createTrajectoryServer(port: number, lockPath: string, options: 
     });
     socket.on("close", () => { disconnect(client); });
     socket.on("error", () => { disconnect(client); });
+    // A dropped tab only sends FIN, and an upgraded socket stays half-open until this side closes it.
+    socket.on("end", () => { socket.destroy(); });
   });
   server.once("listening", () => { void writeFile(lockPath, `${JSON.stringify({ pid: process.pid, port, fingerprint: serverFingerprint, startedAt: Date.now() })}\n`, { mode: 0o600 }).catch(() => { process.exitCode = 1; }); scheduleIdleExit(); });
   server.on("close", () => { closed = true; if (idleTimer !== undefined) { clearTimeout(idleTimer); idleTimer = undefined; } });

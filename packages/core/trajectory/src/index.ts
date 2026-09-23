@@ -180,6 +180,9 @@ const MAX_FRAME_BYTES = 32 * 1024 * 1024;
 const MAX_LIVE_STATE_BYTES = MAX_FRAME_BYTES - 1024;
 const MAX_TRANSCRIPT_REQUESTS = 64;
 const TRANSCRIPT_REQUEST_TIMEOUT_MS = 10_000;
+const ACTIVE_POLL_MS = 1_000;
+// Nobody is watching, so the publisher stops reading run state every second.
+const IDLE_POLL_MS = 10_000;
 const RECONNECT_INITIAL_DELAY_MS = 100;
 const RECONNECT_MAX_DELAY_MS = 5_000;
 type LiveStateRecord = Record<string, unknown>;
@@ -211,19 +214,21 @@ function liveValueWillBeBounded(value: unknown, key = "", depth = 0): boolean {
   if (!LIVE_METADATA_OBJECT_KEYS.has(key) && Object.keys(value).length > MAX_LIVE_OBJECT_KEYS) return true;
   return properties.some((property) => liveValueWillBeBounded(value[property], property, depth + 1));
 }
+const MAX_LIVE_TIMING_BYTES = 64 * 1024;
+/** Keeps the newest timing entries: dropping the oldest leaves a live agent's gantt growing instead of frozen. */
 function boundedTiming(value: unknown): unknown[] {
   const entries = Array.isArray(value) ? value.filter(isTimingEntry) : [];
   const retained: unknown[] = [];
   let bytes = 2;
-  for (const entry of entries) {
+  for (let index = entries.length - 1; index >= 0; index -= 1) {
     let serialized: string;
-    try { serialized = JSON.stringify(entry); } catch { continue; }
+    try { serialized = JSON.stringify(entries[index]); } catch { continue; }
     const nextBytes = bytes + (retained.length ? 1 : 0) + Buffer.byteLength(serialized);
-    if (nextBytes >= 64 * 1024) break;
-    retained.push(entry);
+    if (nextBytes >= MAX_LIVE_TIMING_BYTES) break;
+    retained.push(entries[index]);
     bytes = nextBytes;
   }
-  return retained;
+  return retained.reverse();
 }
 type LiveBounds = { argsTruncatedRuns: Set<number>; path: string[]; runIndex: number | undefined };
 function boundedLiveValue(value: unknown, key = "", depth = 0, bounds?: LiveBounds): unknown {
@@ -383,7 +388,8 @@ export function createTrajectoryController(agentDir: string): TrajectoryControll
   const pendingTranscripts = new Map<string, PendingTranscript>();
   const stopPolling = () => { if (pollTimer !== undefined) { clearInterval(pollTimer); pollTimer = undefined; } };
   const clearTranscriptRequests = () => { for (const request of pendingTranscripts.values()) clearTimeout(request.timer); pendingTranscripts.clear(); };
-  const startPolling = () => { stopPolling(); pollTimer = setInterval(() => { void sendState().catch((error: unknown) => { if (!closing) console.error(`Trajectory state publish failed: ${errorText(error)}`); }); }, 1000); pollTimer.unref(); };
+  let viewers = 0;
+  const startPolling = () => { stopPolling(); pollTimer = setInterval(() => { void sendState().catch((error: unknown) => { if (!closing) console.error(`Trajectory state publish failed: ${errorText(error)}`); }); }, viewers > 0 ? ACTIVE_POLL_MS : IDLE_POLL_MS); pollTimer.unref(); };
   let stateLoad: { socket: TrajectoryPublisherClient; task: Promise<void> } | undefined;
   let lastState: string | undefined;
   const publisherValue = (input: TrajectoryPublisherInput): LiveStateRecord => ({ id: publisherId(input.cwd, input.sessionId), title: `session ${input.sessionId.slice(0, 8)}`, cwd: input.cwd, sessionId: input.sessionId, themes: input.themes, connected: true });
@@ -515,6 +521,14 @@ export function createTrajectoryController(agentDir: string): TrajectoryControll
         const message: unknown = JSON.parse(typeof event === "object" && event !== null && "data" in event ? String(event.data) : "");
         if (!object(message)) return;
         if (message.type === "publisher:replaced") { established = false; return; }
+        if (message.type === "publisher:viewers" && typeof message.count === "number") {
+          const watched = viewers > 0;
+          viewers = message.count;
+          if (watched === viewers > 0) return;
+          if (socket === next && !closing) startPolling();
+          if (viewers > 0) void sendState().catch(() => undefined);
+          return;
+        }
         if (message.type === "publisher:transcript" && typeof message.requestId === "string" && typeof message.publisherId === "string" && (typeof message.runId === "string" && typeof message.agentId === "string" || typeof message.subagentId === "string")) { handleTranscriptRequest(next, generation, message, input); return; }
         if (message.type !== "publisher:action" || typeof message.requestId !== "string") return;
         const sendActionResponse = (response: LiveStateRecord): void => { if (socket !== next || closing || next.readyState !== 1) return; let serialized: string; try { serialized = JSON.stringify(response); } catch { serialized = JSON.stringify({ type: "publisher:action-result", requestId: response.requestId, publisherId: response.publisherId, ok: false, error: "Trajectory action result is invalid" }); } if (Buffer.byteLength(serialized) >= MAX_FRAME_BYTES) serialized = JSON.stringify({ type: "publisher:action-result", requestId: response.requestId, publisherId: response.publisherId, ok: false, error: "Trajectory action result is too large" }); next.send(serialized); };

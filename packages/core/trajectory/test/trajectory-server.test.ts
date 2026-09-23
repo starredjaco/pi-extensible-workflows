@@ -49,7 +49,7 @@ function maskedCloseFrame(): Buffer {
   return Buffer.from([0x88, 0x80, 1, 2, 3, 4]);
 }
 
-function decodeTextFrame(buffer: Buffer): { payload: string } | undefined {
+function decodeTextFrame(buffer: Buffer): { payload: string; consumed: number } | undefined {
   if (buffer.length < 2) return undefined;
   const second = buffer[1] ?? 0;
   assert.equal(second & 0x80, 0);
@@ -65,21 +65,34 @@ function decodeTextFrame(buffer: Buffer): { payload: string } | undefined {
     offset = 10;
   }
   if (buffer.length < offset + length) return undefined;
-  return { payload: buffer.subarray(offset, offset + length).toString("utf8") };
+  return { payload: buffer.subarray(offset, offset + length).toString("utf8"), consumed: offset + length };
 }
 
-async function readJsonFrame(socket: Socket): Promise<unknown> {
-  let buffer = Buffer.alloc(0);
+const frameLeftovers = new WeakMap<Socket, Buffer>();
+function isViewerFrame(value: unknown): boolean {
+  return typeof value === "object" && value !== null && (value as { type?: unknown }).type === "publisher:viewers";
+}
+/** Reads one frame, keeping unread bytes so coalesced frames stay available to the next read. */
+async function readJsonFrame(socket: Socket, accept: (value: unknown) => boolean = (value) => !isViewerFrame(value)): Promise<unknown> {
   return new Promise((resolve, reject) => {
+    let buffer = frameLeftovers.get(socket) ?? Buffer.alloc(0);
     const timer = setTimeout(() => { reject(new Error("timed out waiting for Trajectory frame")); }, 2000);
-    const onData = (chunk: Buffer) => {
-      buffer = Buffer.concat([buffer, chunk]);
-      const decoded = decodeTextFrame(buffer);
-      if (!decoded) return;
-      clearTimeout(timer);
-      socket.off("data", onData);
-      resolve(JSON.parse(decoded.payload));
+    const drain = (): boolean => {
+      for (;;) {
+        const decoded = decodeTextFrame(buffer);
+        if (!decoded) { frameLeftovers.set(socket, buffer); return false; }
+        buffer = buffer.subarray(decoded.consumed);
+        const value: unknown = JSON.parse(decoded.payload);
+        if (!accept(value)) continue;
+        frameLeftovers.set(socket, buffer);
+        clearTimeout(timer);
+        socket.off("data", onData);
+        resolve(value);
+        return true;
+      }
     };
+    const onData = (chunk: Buffer) => { buffer = Buffer.concat([buffer, chunk]); drain(); };
+    if (drain()) return;
     socket.on("data", onData);
     socket.once("error", reject);
   });
@@ -619,6 +632,103 @@ void test("Trajectory idle exit closes open clients and removes its lock", async
     socket?.destroy();
     pending?.destroy();
     if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+function timingState(id: string, revision: number, entries: number): string {
+  const timing = Array.from({ length: entries }, (_, index) => ({ type: "custom", customType: "pi-workflows:tool-timing", data: { toolCallId: `call-${String(index)}`, toolName: "read", startedAt: 1_000 + index, completedAt: 1_100 + index, durationMs: 100, isError: false } }));
+  return JSON.stringify({
+    type: "publisher:state",
+    publisher: { id },
+    runs: [
+      { run: { id: "focused", workflowName: "focused", agents: [], state: "running" }, transcripts: { agent: { revision, status: "available", timing } }, snapshot: {}, awaiting: [] },
+      { run: { id: "other", workflowName: "other", agents: [], state: "completed" }, transcripts: { agent: { revision, status: "available", timing } }, snapshot: {}, awaiting: [] },
+    ],
+    subagents: [],
+  });
+}
+
+type StateFrame = { publishers: { id: string; runs: { run: { id: string }; transcripts: { agent: { revision: number; timing?: unknown[] } } }[] }[] };
+function stateFrame(value: unknown): StateFrame {
+  assert.ok(value && typeof value === "object" && (value as { type?: unknown }).type === "state");
+  return value as StateFrame;
+}
+function focusedTranscript(frame: StateFrame, runId: string): { revision: number; timing?: unknown[] } {
+  const run = frame.publishers[0]?.runs.find((candidate) => candidate.run.id === runId);
+  assert.ok(run);
+  return run.transcripts.agent;
+}
+
+void test("Trajectory ships tool-timing once per revision to the focused browser", async () => {
+  const root = await mkdtemp(join(tmpdir(), "trajectory-server-timing-"));
+  const port = await availablePort();
+  const server = createTrajectoryServer(port, join(root, "trajectory.lock"));
+  await listen(server, port);
+  const origin = `http://127.0.0.1:${String(port)}`;
+  const publisher = await handshake(port, origin);
+  const browser = await handshake(port, origin);
+  try {
+    publisher.socket.write(maskedFrame(JSON.stringify({ type: "publisher:attach", publisherId: "pub" })));
+    browser.socket.write(maskedFrame(JSON.stringify({ type: "ui:attach" })));
+    await readJsonFrame(browser.socket);
+    publisher.socket.write(maskedFrame(timingState("pub", 7, 3)));
+    await readJsonFrame(browser.socket);
+
+    browser.socket.write(maskedFrame(JSON.stringify({ type: "ui:focus", publisherId: "pub", runId: "focused" })));
+    const first = stateFrame(await readJsonFrame(browser.socket));
+    assert.equal(focusedTranscript(first, "focused").timing?.length, 3);
+    assert.deepEqual(focusedTranscript(first, "other").timing, []);
+
+    publisher.socket.write(maskedFrame(timingState("pub", 7, 3)));
+    const repeated = stateFrame(await readJsonFrame(browser.socket));
+    assert.equal(focusedTranscript(repeated, "focused").timing, undefined);
+
+    publisher.socket.write(maskedFrame(timingState("pub", 8, 4)));
+    const changed = stateFrame(await readJsonFrame(browser.socket));
+    assert.equal(focusedTranscript(changed, "focused").timing?.length, 4);
+
+    browser.socket.write(maskedFrame(JSON.stringify({ type: "ui:focus", publisherId: "pub", runId: "other" })));
+    const switched = stateFrame(await readJsonFrame(browser.socket));
+    assert.equal(focusedTranscript(switched, "other").timing?.length, 4);
+    assert.deepEqual(focusedTranscript(switched, "focused").timing, []);
+  } finally {
+    publisher.socket.destroy();
+    browser.socket.destroy();
+    server.closeAllConnections();
+    server.close();
+    server.unref();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+void test("Trajectory tells publishers how many browsers are watching", async () => {
+  const root = await mkdtemp(join(tmpdir(), "trajectory-server-viewers-"));
+  const port = await availablePort();
+  const server = createTrajectoryServer(port, join(root, "trajectory.lock"));
+  await listen(server, port);
+  const origin = `http://127.0.0.1:${String(port)}`;
+  const publisher = await handshake(port, origin);
+  const browser = await handshake(port, origin);
+  try {
+    publisher.socket.write(maskedFrame(JSON.stringify({ type: "publisher:attach", publisherId: "pub" })));
+    assert.deepEqual(await readJsonFrame(publisher.socket, isViewerFrame), { type: "publisher:viewers", count: 0 });
+    browser.socket.write(maskedFrame(JSON.stringify({ type: "ui:attach" })));
+    assert.deepEqual(await readJsonFrame(publisher.socket, isViewerFrame), { type: "publisher:viewers", count: 1 });
+    browser.socket.write(maskedCloseFrame());
+    assert.deepEqual(await readJsonFrame(publisher.socket, isViewerFrame), { type: "publisher:viewers", count: 0 });
+    // A tab that dies sends FIN without a close frame, which must still drop the client.
+    const dropped = await handshake(port, origin);
+    dropped.socket.write(maskedFrame(JSON.stringify({ type: "ui:attach" })));
+    assert.deepEqual(await readJsonFrame(publisher.socket, isViewerFrame), { type: "publisher:viewers", count: 1 });
+    dropped.socket.end();
+    assert.deepEqual(await readJsonFrame(publisher.socket, isViewerFrame), { type: "publisher:viewers", count: 0 });
+  } finally {
+    publisher.socket.destroy();
+    browser.socket.destroy();
+    server.closeAllConnections();
+    server.close();
+    server.unref();
     await rm(root, { recursive: true, force: true });
   }
 });

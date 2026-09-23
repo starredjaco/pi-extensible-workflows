@@ -1180,3 +1180,34 @@ void test("trajectory run loaders serve cached runs until state, journal, or tra
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+type TrajectoryToolBarHelpers = {
+  mergedToolBars: (timings: readonly { name: string; timing: Record<string, unknown> }[], span: number) => readonly { start: number; end: number; count: number; error: boolean; names: string[] }[];
+};
+
+void test("Trajectory merges only tool bars that overlap on the track", () => {
+  const source = readFileSync(new URL("../src/assets/index.html", import.meta.url), "utf8");
+  const helperStart = source.indexOf("    const TOOL_BAR_MERGE_RATIO");
+  const helperEnd = source.indexOf("    function renderGantt", helperStart);
+  assert.ok(helperStart >= 0 && helperEnd > helperStart);
+  const helpers = runInNewContext(`(() => { const formatToolTiming = () => ""; const fmtRuntime = () => ""; ${source.slice(helperStart, helperEnd)}; return { mergedToolBars }; })()`) as TrajectoryToolBarHelpers;
+  const call = (startedAt: number, durationMs: number, isError = false) => ({ name: isError ? "bash" : "read", timing: { toolCallId: `call-${String(startedAt)}`, toolName: "read", startedAt, completedAt: startedAt + durationMs, durationMs, isError } });
+  const span = 100_000;
+  const adjacent = [...helpers.mergedToolBars([call(0, 50), call(60, 50), call(500, 10, true)], span)];
+  assert.deepEqual(adjacent.map(({ count, error, start, end }) => `${String(count)}/${String(error)}/${String(start)}-${String(end)}`), ["2/false/0-110", "1/true/500-510"]);
+  assert.equal([...helpers.mergedToolBars([call(0, 50), call(20_000, 50), call(80_000, 50)], span)].length, 3);
+  const merged = [...helpers.mergedToolBars([call(0, 50), call(60, 50, true)], span)];
+  assert.deepEqual(merged.map(({ count, error, names }) => `${String(count)}/${String(error)}/${[...names].join("+")}`), ["2/true/read+bash"]);
+});
+
+void test("live state keeps the newest tool timings when an agent exceeds the timing budget", () => {
+  const entry = (index: number) => ({ type: "custom", customType: "pi-workflows:tool-timing", data: { toolCallId: `call-${String(index).padStart(6, "0")}`, toolName: "read", startedAt: 1_000 + index, completedAt: 1_010 + index, durationMs: 10, isError: false } });
+  const timing = Array.from({ length: 2_000 }, (_, index) => entry(index));
+  const published = minimalStatePublisher({ runs: [{ run: { id: "run", agents: [] }, transcripts: { agent: { revision: 1, status: "available", timing } } }], subagents: [] }) as { runs?: readonly { transcripts?: { agent?: { timing?: readonly { data?: { toolCallId?: string } }[] } } }[] };
+  const retained = published.runs?.[0]?.transcripts?.agent?.timing;
+  assert.ok(retained && retained.length > 0 && retained.length < timing.length, `retained ${String(retained?.length)} of ${String(timing.length)}`);
+  assert.ok(Buffer.byteLength(JSON.stringify(retained)) < 64 * 1024);
+  // The live gantt must follow the agent, so the newest calls survive and stay ordered.
+  assert.equal(retained.at(-1)?.data?.toolCallId, "call-001999");
+  assert.deepEqual([...retained].map((value) => value.data?.toolCallId), [...retained].map((value) => value.data?.toolCallId).sort());
+});
