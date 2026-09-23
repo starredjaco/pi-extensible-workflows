@@ -6,6 +6,7 @@ import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { exportTrajectoryRunHtml } from "../index.js";
+import { createTrajectoryServer } from "../src/server.js";
 import { RunStore } from "../../src/persistence.js";
 import { createLaunchSnapshot } from "../../src/utils.js";
 import type { PersistedRun } from "../../src/persistence.js";
@@ -204,4 +205,64 @@ void test("Trajectory Chromium view preserves the selected Output tab across liv
       assert.match(String(await page.evaluate("document.getElementById('sys-pane').textContent")), /answer.*done/);
     });
   } finally { await server.close(); }
+});
+
+function toolTiming(id: string, startedAt: number, durationMs: number, isError = false): Record<string, unknown> {
+  return { type: "custom", customType: "pi-workflows:tool-timing", data: { toolCallId: id, toolName: "read", startedAt, completedAt: startedAt + durationMs, durationMs, isError } };
+}
+
+void test("Trajectory live gantt keeps cached timing, merges dense calls, and pauses while hidden", { skip: !browserPath, timeout: 120_000 }, async () => {
+  const probe = createServer();
+  await new Promise<void>((resolve, reject) => { probe.once("error", reject); probe.listen(0, "127.0.0.1", resolve); });
+  const address = probe.address();
+  assert.ok(address && typeof address !== "string");
+  const port = address.port;
+  await new Promise<void>((resolve) => { probe.close(() => { resolve(); }); });
+  const root = mkdtempSync(join(tmpdir(), "pi-extensible-workflows-trajectory-live-"));
+  const server = createTrajectoryServer(port, join(root, "lock.json"));
+  await new Promise<void>((resolve, reject) => { server.once("error", reject); server.listen(port, "127.0.0.1", resolve); });
+  const start = Date.now() - 600_000;
+  // Sparse calls stay separate bars; the dense burst collapses into one; the failure must survive merging.
+  const baseline = [...Array.from({ length: 20 }, (_, index) => toolTiming(`sparse-${String(index)}`, start + index * 20_000, 3_000, index === 7)), ...Array.from({ length: 50 }, (_, index) => toolTiming(`burst-${String(index)}`, start + 500_000 + index * 20, 15))];
+  let tick = 0;
+  const agent = (id: string, running: boolean) => ({ id, name: id, label: id, path: id, state: running ? "running" : "completed", attempts: 1, startedAt: start, durationMs: running ? undefined : 550_000, lastEventAt: Date.now(), model: { provider: "fixture", model: "model" }, tools: ["read"] });
+  const publisherId = "livepublisher1";
+  const publisher = new WebSocket(`ws://127.0.0.1:${String(port)}/ws`);
+  await new Promise((resolve) => { publisher.addEventListener("open", resolve, { once: true }); });
+  publisher.send(JSON.stringify({ type: "publisher:attach", publisherId }));
+  const publish = () => {
+    // Only the running agent gains calls, so the done agent's timing is omitted after its first delivery.
+    const live = Array.from({ length: tick }, (_, index) => toolTiming(`live-${String(index)}`, start + 560_000 + index * 15_000, 4_000));
+    const run = { id: "live", workflowName: "live-workflow", cwd: "/project", sessionId: "session", state: "running", agents: [agent("done", false), agent("busy", true)], agentSessions: [], events: [] };
+    publisher.send(JSON.stringify({ type: "publisher:state", publisher: { id: publisherId, title: "live", cwd: "/project", sessionId: "session", themes: false, connected: true }, runs: [{ run, snapshot: { script: "return true;" }, transcripts: { done: { revision: 1, status: "available", timing: baseline }, busy: { revision: 100 + tick, status: "available", timing: [...baseline, ...live] } } }], subagents: [] }));
+    tick += 1;
+  };
+  publish();
+  const timer = setInterval(publish, 250);
+  const bars = (lane: string, selector = ".bar.tool") => `document.querySelectorAll('#swim-content .lane[data-agent="${lane}"] ${selector}').length`;
+  try {
+    await withChrome(`http://127.0.0.1:${String(port)}/?view=run&run=${publisherId}:live`, async (page) => {
+      await waitFor(page, `${bars("done")} > 0 && ${bars("busy")} > 0`);
+      const done = Number(await page.evaluate(bars("done")));
+      assert.ok(done > 1 && done < baseline.length, `dense calls merge into fewer bars, got ${String(done)}`);
+      assert.ok(Number(await page.evaluate(bars("done", ".bar.tool.fail"))) > 0, "failed call keeps its styling after merging");
+      assert.equal(Number(await page.evaluate("document.querySelectorAll('#swim-content .bar.tool[title*=\"tool calls\"]').length")) > 0, true);
+      const busy = Number(await page.evaluate(bars("busy")));
+      await delay(1_500);
+      assert.equal(Number(await page.evaluate(bars("done"))), done, "timing omitted by the server is carried forward from cache");
+      assert.ok(Number(await page.evaluate(bars("busy"))) > busy, "new live timing reaches the gantt");
+      await page.evaluate("Object.defineProperty(document, 'hidden', { configurable: true, get: () => true }); document.dispatchEvent(new Event('visibilitychange'))");
+      const hidden = Number(await page.evaluate(bars("busy")));
+      await delay(1_000);
+      assert.equal(Number(await page.evaluate(bars("busy"))), hidden, "hidden tab does not render");
+      await page.evaluate("Object.defineProperty(document, 'hidden', { configurable: true, get: () => false }); document.dispatchEvent(new Event('visibilitychange'))");
+      await waitFor(page, `${bars("busy")} > ${String(hidden)}`);
+      assert.equal(Number(await page.evaluate(bars("done"))), done, "timing is restored after the tab returns");
+    });
+  } finally {
+    clearInterval(timer);
+    publisher.close();
+    await new Promise<void>((resolve) => { server.close(() => { resolve(); }); });
+    rmSync(root, { recursive: true, force: true });
+  }
 });
