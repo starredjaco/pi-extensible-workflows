@@ -1229,3 +1229,15 @@ void test("Trajectory highlights code with Prism and keeps multi-line tokens col
     assert.match(line, /class="token template-string"/);
   }
 });
+
+void test("Trajectory lists runs by newest completion with running runs on top", () => {
+  const source = readFileSync(new URL("../src/assets/index.html", import.meta.url), "utf8");
+  const helperStart = source.indexOf("    const startOf = ");
+  const helperEnd = source.indexOf("\n", source.indexOf("    const runsByCompletion = ")) + 1;
+  assert.ok(helperStart >= 0 && helperEnd > helperStart);
+  assert.match(source, /value\.publishers\.filter\(\(publisher\) => publisher\.connected === true\)\.map\(runsByCompletion\)/);
+  const helpers = runInNewContext(`(() => { ${source.slice(helperStart, helperEnd)}; return { runsByCompletion }; })()`, { Date, Math, Number }) as { runsByCompletion: (publisher: { runs: unknown[] }) => { runs: { run: { id: string } }[] } };
+  const record = (id: string, state: string, startedAt: number, durationMs?: number) => ({ run: { id, state, agents: [{ startedAt, ...(durationMs === undefined ? {} : { durationMs }) }] } });
+  const ordered = helpers.runsByCompletion({ runs: [record("old-done", "completed", 1_000, 1_000), record("old-running", "running", 2_000), record("late-done", "failed", 1_500, 10_000), record("new-running", "running", 3_000), record("mid-done", "stopped", 5_000, 1_000)] });
+  assert.deepEqual(ordered.runs.map((value) => value.run.id), ["new-running", "old-running", "late-done", "mid-done", "old-done"]);
+});
