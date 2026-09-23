@@ -1353,8 +1353,10 @@ class PersistentSubagentManager implements SubagentManager {
       run.disposed = true;
       this.clearSteering(run);
       await this.cleanupSessions(run, true);
-      const worktreeCleaned = await this.cleanupWorktree(run);
-      if (worktreeCleaned) await enqueueWrite(run, () => atomicJson(statusPath(run.directory), persistedStatus(run)));
+      await this.cleanupWorktree(run);
+      // A run that settled just before disposal may not have written its terminal status yet: finishTerminal returns early
+      // once the run is disposed. Left as "running" under this live process, the next manager here would never reconcile it.
+      await enqueueWrite(run, () => atomicJson(statusPath(run.directory), persistedStatus(run)));
       this.resolveTerminal(run);
       this.removeLiveRun(run);
     }

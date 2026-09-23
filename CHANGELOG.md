@@ -1,6 +1,10 @@
 # Changelog
 ## Unreleased
 
+### Fixes
+
+- A subagent that settled just before its manager was disposed, for example at session shutdown, no longer stays `running` on disk. Disposal skipped the terminal status write, and a new manager in the same Pi process treated the record as owned by a live process, so it kept showing as running and could not be retried.
+
 ## [5.17.0] - 2026-09-23
 
 ### New capabilities
